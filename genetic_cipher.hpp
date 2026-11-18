@@ -34,6 +34,7 @@
 #include <cstddef>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <future>
@@ -45,13 +46,34 @@
 #include <span>
 #include <sstream>
 #include <thread>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace genetic_cipher {
 
 namespace fs = std::filesystem;
+
+// Alignment-safe scalar read: casting an arbitrary byte pointer to uint64_t* is
+// undefined behaviour on strict-alignment targets, so copy instead.
+template<typename T>
+inline T read_pod(const uint8_t*& p) {
+    T value{};
+    std::memcpy(&value, p, sizeof(T));
+    p += sizeof(T);
+    return value;
+}
+
+// ============================================================================
+// Byte Span Aliases
+// ============================================================================
+using byte_span = std::span<uint8_t>;
+using const_byte_span = std::span<const uint8_t>;
+
+// Maximum number of file chunks pulled per streaming batch
+constexpr size_t MAX_CONCURRENT_CHUNKS = 16;
 
 // ============================================================================
 // Version Information
@@ -190,9 +212,18 @@ private:
     uint64_t m_directory_offset = 0;
     uint64_t m_directory_hash = 0;
     
+    // Order-independent: an unordered_map's iteration order changes after a
+    // deserialize, so hashing in iteration order made every archive fail its own
+    // integrity check on load.
     uint64_t compute_directory_hash() const {
+        std::vector<std::string> names;
+        names.reserve(m_files.size());
+        for (const auto& [name, entry] : m_files) names.push_back(name);
+        std::sort(names.begin(), names.end());
+
         uint64_t hash = 0x9e3779b97f4a7c15ULL;
-        for (const auto& [name, entry] : m_files) {
+        for (const auto& name : names) {
+            const auto& entry = m_files.at(name);
             for (char c : name) {
                 hash = (hash ^ static_cast<uint64_t>(c)) * 0x9e3779b97f4a7c15ULL;
                 hash = std::rotl(hash, 13);
@@ -278,14 +309,12 @@ public:
         
         const uint8_t* ptr = data.data();
         
-        uint64_t version = *reinterpret_cast<const uint64_t*>(ptr);
-        ptr += sizeof(uint64_t);
+        uint64_t version = read_pod<uint64_t>(ptr);
+        (void)version;   // format stamp, kept for forward compatibility checks
         
-        uint64_t file_count = *reinterpret_cast<const uint64_t*>(ptr);
-        ptr += sizeof(uint64_t);
+        uint64_t file_count = read_pod<uint64_t>(ptr);
         
-        uint64_t expected_hash = *reinterpret_cast<const uint64_t*>(ptr);
-        ptr += sizeof(uint64_t);
+        uint64_t expected_hash = read_pod<uint64_t>(ptr);
         
         for (uint64_t i = 0; i < file_count; ++i) {
             size_t max_size = data.size() - (ptr - data.data());
@@ -412,24 +441,18 @@ inline FileEntry FileEntry::deserialize(const_byte_span data) {
     FileEntry entry;
     const uint8_t* ptr = data.data();
     
-    uint32_t name_len = *reinterpret_cast<const uint32_t*>(ptr);
-    ptr += sizeof(uint32_t);
+    uint32_t name_len = read_pod<uint32_t>(ptr);
     entry.filename = std::string(reinterpret_cast<const char*>(ptr), name_len);
     ptr += name_len;
     
-    uint32_t path_len = *reinterpret_cast<const uint32_t*>(ptr);
-    ptr += sizeof(uint32_t);
+    uint32_t path_len = read_pod<uint32_t>(ptr);
     entry.original_path = std::string(reinterpret_cast<const char*>(ptr), path_len);
     ptr += path_len;
     
-    entry.original_size = *reinterpret_cast<const uint64_t*>(ptr);
-    ptr += sizeof(uint64_t);
-    entry.encrypted_offset = *reinterpret_cast<const uint64_t*>(ptr);
-    ptr += sizeof(uint64_t);
-    entry.encrypted_size = *reinterpret_cast<const uint64_t*>(ptr);
-    ptr += sizeof(uint64_t);
-    entry.hash = *reinterpret_cast<const uint64_t*>(ptr);
-    ptr += sizeof(uint64_t);
+    entry.original_size = read_pod<uint64_t>(ptr);
+    entry.encrypted_offset = read_pod<uint64_t>(ptr);
+    entry.encrypted_size = read_pod<uint64_t>(ptr);
+    entry.hash = read_pod<uint64_t>(ptr);
     
     entry.stored_bit_mode = static_cast<BitMode>(*ptr);
     ptr += 1;
@@ -437,26 +460,20 @@ inline FileEntry FileEntry::deserialize(const_byte_span data) {
     entry.access_mode = static_cast<FileAccessMode>(*ptr);
     ptr += 1;
     
-    entry.chunk_count = *reinterpret_cast<const uint64_t*>(ptr);
-    ptr += sizeof(uint64_t);
+    entry.chunk_count = read_pod<uint64_t>(ptr);
     
-    uint32_t chunk_map_size = *reinterpret_cast<const uint32_t*>(ptr);
-    ptr += sizeof(uint32_t);
+    uint32_t chunk_map_size = read_pod<uint32_t>(ptr);
     
     for (uint32_t i = 0; i < chunk_map_size; ++i) {
-        uint64_t enc_off = *reinterpret_cast<const uint64_t*>(ptr);
-        ptr += sizeof(uint64_t);
-        uint64_t orig_off = *reinterpret_cast<const uint64_t*>(ptr);
-        ptr += sizeof(uint64_t);
+        uint64_t enc_off = read_pod<uint64_t>(ptr);
+        uint64_t orig_off = read_pod<uint64_t>(ptr);
         entry.chunk_map.emplace_back(enc_off, orig_off);
     }
     
-    int64_t time_val = *reinterpret_cast<const int64_t*>(ptr);
-    ptr += sizeof(int64_t);
+    int64_t time_val = read_pod<int64_t>(ptr);
     entry.timestamp = std::chrono::system_clock::time_point(std::chrono::system_clock::duration(time_val));
     
-    uint32_t meta_len = *reinterpret_cast<const uint32_t*>(ptr);
-    ptr += sizeof(uint32_t);
+    uint32_t meta_len = read_pod<uint32_t>(ptr);
     entry.metadata.assign(ptr, ptr + meta_len);
     
     return entry;
@@ -508,6 +525,14 @@ private:
     std::unordered_map<std::string, uint64_t> m_tag_to_node;
     mutable std::shared_mutex m_tag_mutex;
     
+    // Bulk access window: operations read/write a flat element vector and pay the
+    // locking and node lookup once per operation instead of once per element.
+    std::vector<uint64_t> m_bulk;
+    std::vector<uint64_t> m_bulk_masks;          // only used for mixed-width containers
+    uint64_t m_bulk_uniform_mask = UINT64_MAX;   // fast path: every node has one width
+    bool m_bulk_uniform = true;
+    std::atomic<bool> m_bulk_active{false};
+
     struct PositionCache {
         uint64_t last_element;
         node_t* last_node;
@@ -518,6 +543,42 @@ private:
     mutable PositionCache m_position_cache;
     mutable std::shared_mutex m_cache_mutex;
     
+    // Lock-free element access used inside a bulk window. Mirrors get_element /
+    // set_element bit-for-bit (MSB-first) but skips locking and node lookup.
+    static uint64_t read_element_raw(const node_t* node, size_t offset) {
+        size_t bits_per_elem = bit_mode_to_size(node->mode);
+        size_t start_bit = offset * bits_per_elem;
+        size_t start_byte = start_bit / 8;
+        size_t bit_offset = start_bit % 8;
+        uint64_t value = 0;
+        for (size_t i = 0; i < bits_per_elem; ++i) {
+            size_t byte_idx = start_byte + (bit_offset + i) / 8;
+            size_t bit_in_byte = (bit_offset + i) % 8;
+            if (byte_idx >= node->size_bytes) break;
+            uint8_t bit = static_cast<uint8_t>((node->data[byte_idx] >> (7 - bit_in_byte)) & 1);
+            value |= (static_cast<uint64_t>(bit) << (bits_per_elem - 1 - i));
+        }
+        return value;
+    }
+
+    static void write_element_raw(node_t* node, size_t offset, uint64_t value) {
+        size_t bits_per_elem = bit_mode_to_size(node->mode);
+        uint64_t max_val = (bits_per_elem >= 64) ? UINT64_MAX : ((1ULL << bits_per_elem) - 1);
+        value &= max_val;
+        size_t start_bit = offset * bits_per_elem;
+        size_t start_byte = start_bit / 8;
+        size_t bit_offset = start_bit % 8;
+        for (size_t i = 0; i < bits_per_elem; ++i) {
+            size_t byte_idx = start_byte + (bit_offset + i) / 8;
+            size_t bit_in_byte = (bit_offset + i) % 8;
+            if (byte_idx >= node->size_bytes) break;
+            uint8_t bit_value = static_cast<uint8_t>((value >> (bits_per_elem - 1 - i)) & 1);
+            uint8_t mask = static_cast<uint8_t>(1u << (7 - bit_in_byte));
+            if (bit_value) node->data[byte_idx] = static_cast<uint8_t>(node->data[byte_idx] | mask);
+            else node->data[byte_idx] = static_cast<uint8_t>(node->data[byte_idx] & ~mask);
+        }
+    }
+
     void add_node_to_maps(node_t* node) {
         {
             std::unique_lock lock(m_node_map_mutex);
@@ -693,7 +754,9 @@ public:
     container_t(size_t chunk_size = 4096, BitMode mode = BitMode::BYTE)
         : m_head(nullptr), m_tail(nullptr), m_total_elements(0), m_total_bytes(0),
           m_node_count(0), m_next_node_id(0), m_global_mode(mode),
-          m_bytes_per_element(bit_mode_to_size(mode) / 8) {}
+          m_bytes_per_element(bit_mode_to_size(mode) / 8) {
+        (void)chunk_size;   // nodes grow on demand; kept for API compatibility
+    }
     
     ~container_t() { clear(); }
     
@@ -705,6 +768,16 @@ public:
           m_total_elements(other.m_total_elements.load()), m_total_bytes(other.m_total_bytes.load()),
           m_node_count(other.m_node_count.load()), m_next_node_id(other.m_next_node_id.load()),
           m_global_mode(other.m_global_mode), m_bytes_per_element(other.m_bytes_per_element) {
+        {
+            std::unique_lock lock(other.m_node_map_mutex);
+            m_node_map = std::move(other.m_node_map);
+            other.m_node_map.clear();
+        }
+        {
+            std::unique_lock lock(other.m_tag_mutex);
+            m_tag_to_node = std::move(other.m_tag_to_node);
+            other.m_tag_to_node.clear();
+        }
         other.m_head = nullptr; other.m_tail = nullptr;
         other.m_total_elements = 0; other.m_total_bytes = 0;
         other.m_node_count = 0;
@@ -717,18 +790,150 @@ public:
             m_total_elements = other.m_total_elements.load(); m_total_bytes = other.m_total_bytes.load();
             m_node_count = other.m_node_count.load(); m_next_node_id = other.m_next_node_id.load();
             m_global_mode = other.m_global_mode; m_bytes_per_element = other.m_bytes_per_element;
+            {
+                std::unique_lock lock(other.m_node_map_mutex);
+                m_node_map = std::move(other.m_node_map);
+                other.m_node_map.clear();
+            }
+            {
+                std::unique_lock lock(other.m_tag_mutex);
+                m_tag_to_node = std::move(other.m_tag_to_node);
+                other.m_tag_to_node.clear();
+            }
             other.m_head = nullptr; other.m_tail = nullptr;
             other.m_total_elements = 0; other.m_total_bytes = 0;
             other.m_node_count = 0;
         }
         return *this;
     }
+
+    // Deep copy (copy construction / assignment are deleted for performance).
+    // Snapshots the source under its lock, then rebuilds nodes with their
+    // per-node bit modes, tags and element counts preserved.
+    void copy_from(const container_t& other) {
+        if (this == &other) return;
+
+        struct node_snapshot {
+            std::vector<uint8_t> bytes;
+            BitMode mode;
+            std::string tag;
+            size_t element_count;
+        };
+
+        std::vector<node_snapshot> snap;
+        {
+            std::shared_lock lock(other.m_list_mutex);
+            snap.reserve(other.m_node_count.load());
+            for (node_t* src = other.m_head.load(); src != nullptr; src = src->next.load()) {
+                node_snapshot s;
+                s.bytes.assign(src->data, src->data + src->size_bytes);
+                s.mode = src->mode;
+                s.tag = src->tag;
+                s.element_count = src->element_count;
+                snap.push_back(std::move(s));
+            }
+        }
+
+        const BitMode new_global_mode = other.m_global_mode;
+        const size_t new_bytes_per_element = other.m_bytes_per_element;
+
+        clear();
+        m_global_mode = new_global_mode;
+        m_bytes_per_element = new_bytes_per_element;
+
+        std::unique_lock lock(m_list_mutex);
+        for (auto& s : snap) {
+            node_t* node = new node_t(std::max<size_t>(s.bytes.size(), m_bytes_per_element * 64),
+                                      m_next_node_id++, s.mode, s.tag);
+            if (!s.bytes.empty()) std::memcpy(node->data, s.bytes.data(), s.bytes.size());
+            node->size_bytes = s.bytes.size();
+            node->element_count = s.element_count;
+
+            node_t* tail = m_tail.load();
+            if (!tail) {
+                m_head = node;
+                m_tail = node;
+            } else {
+                tail->next = node;
+                node->prev = tail;
+                m_tail = node;
+            }
+
+            add_node_to_maps(node);
+            m_total_elements.fetch_add(node->element_count);
+            m_total_bytes.fetch_add(node->size_bytes);
+            m_node_count.fetch_add(1);
+        }
+        invalidate_position_cache();
+    }
+
+    container_t clone() const {
+        container_t copy(4096, m_global_mode);
+        copy.copy_from(*this);
+        return copy;
+    }
     
     // ========================================================================
     // Element Access
     // ========================================================================
     
+    // ---- bulk window -------------------------------------------------------
+    void begin_bulk() {
+        if (m_bulk_active.load(std::memory_order_relaxed)) return;
+        std::shared_lock lock(m_list_mutex);
+        m_bulk.clear();
+        m_bulk_masks.clear();
+        m_bulk.reserve(m_total_elements.load());
+
+        // Single-width containers are the normal case; skip the per-element mask
+        // array entirely for them.
+        bool first = true;
+        uint64_t uniform = UINT64_MAX;
+        bool uniform_ok = true;
+        for (node_t* node = m_head.load(); node != nullptr; node = node->next.load()) {
+            size_t bits = bit_mode_to_size(node->mode);
+            uint64_t mask = (bits >= 64) ? UINT64_MAX : ((1ULL << bits) - 1);
+            if (first) { uniform = mask; first = false; }
+            else if (mask != uniform) { uniform_ok = false; }
+            for (size_t e = 0; e < node->element_count; ++e) {
+                m_bulk.push_back(read_element_raw(node, e));
+            }
+        }
+        m_bulk_uniform = uniform_ok;
+        m_bulk_uniform_mask = uniform;
+        if (!uniform_ok) {
+            m_bulk_masks.reserve(m_bulk.size());
+            for (node_t* node = m_head.load(); node != nullptr; node = node->next.load()) {
+                size_t bits = bit_mode_to_size(node->mode);
+                uint64_t mask = (bits >= 64) ? UINT64_MAX : ((1ULL << bits) - 1);
+                for (size_t e = 0; e < node->element_count; ++e) m_bulk_masks.push_back(mask);
+            }
+        }
+        m_bulk_active.store(true, std::memory_order_relaxed);
+    }
+
+    void end_bulk() {
+        if (!m_bulk_active.exchange(false, std::memory_order_relaxed)) return;
+        std::unique_lock lock(m_list_mutex);
+        size_t idx = 0;
+        for (node_t* node = m_head.load(); node != nullptr && idx < m_bulk.size();
+             node = node->next.load()) {
+            for (size_t e = 0; e < node->element_count && idx < m_bulk.size(); ++e, ++idx) {
+                write_element_raw(node, e, m_bulk[idx]);
+            }
+        }
+        invalidate_position_cache();
+    }
+
+    // Kept small so the common in-bulk call inlines to a compare and a load.
     uint64_t get_element(uint64_t element_index) const {
+        if (m_bulk_active.load(std::memory_order_relaxed)) {
+            return (element_index < m_bulk.size()) ? m_bulk[element_index] : 0;
+        }
+        return get_element_locked(element_index);
+    }
+
+    uint64_t get_element_locked(uint64_t element_index) const {
         std::shared_lock lock(m_list_mutex);
         auto [node, offset] = find_node_at_element(element_index);
         if (!node) return 0;
@@ -750,6 +955,17 @@ public:
     }
     
     void set_element(uint64_t element_index, uint64_t value) {
+        if (m_bulk_active.load(std::memory_order_relaxed)) {
+            if (element_index < m_bulk.size()) {
+                m_bulk[element_index] = value & (m_bulk_uniform ? m_bulk_uniform_mask
+                                                                : m_bulk_masks[element_index]);
+            }
+            return;
+        }
+        set_element_locked(element_index, value);
+    }
+
+    void set_element_locked(uint64_t element_index, uint64_t value) {
         std::unique_lock lock(m_list_mutex);
         auto [node, offset] = find_node_at_element(element_index);
         if (!node) return;
@@ -820,10 +1036,14 @@ public:
         node->element_count = count;
         
         if (bits_per_elem >= 8) {
+            // Most-significant byte first: get_element()/set_element() address bits
+            // MSB-first, so a little-endian store here silently corrupted every
+            // multi-byte mode (16/32/64-bit).
             size_t bytes_per_elem = bits_per_elem / 8;
             for (size_t i = 0; i < count; ++i) {
                 for (size_t b = 0; b < bytes_per_elem; ++b) {
-                    node->data[i * bytes_per_elem + b] = static_cast<uint8_t>((elements[i] >> (b * 8)) & 0xFF);
+                    node->data[i * bytes_per_elem + b] =
+                        static_cast<uint8_t>((elements[i] >> ((bytes_per_elem - 1 - b) * 8)) & 0xFF);
                 }
             }
             node->size_bytes = count * bytes_per_elem;
@@ -1225,6 +1445,8 @@ private:
     int64_t m_direction;
     std::array<uint8_t, 32> m_key;
     std::array<uint8_t, 12> m_nonce;
+    std::array<uint8_t, 32> m_base_key{};
+    std::array<uint8_t, 12> m_base_nonce{};
     mutable std::mutex m_mutex;
     std::vector<uint8_t> m_electronic_password_buffer;
     size_t m_ep_position;
@@ -1376,6 +1598,8 @@ public:
         for (size_t i = 0; i < 12; ++i) {
             m_nonce[i] = key_material[i] ^ key_material[i + 20];
         }
+        m_base_key = m_key;
+        m_base_nonce = m_nonce;
         
         m_counter = 0;
         m_initial_counter = 0;
@@ -1385,6 +1609,44 @@ public:
         m_is_seeded = true;
     }
     
+    // Re-derive the whole generator from the stored key material plus a token.
+    // Called before every operation so encryption and decryption see the exact
+    // same keystream without having to replay the generator backwards.
+    void reseed(uint64_t token) {
+        std::unique_lock lock(m_mutex);
+
+        std::array<uint8_t, 32> km = m_base_key;
+        uint8_t token_bytes[8];
+        std::memcpy(token_bytes, &token, sizeof(token_bytes));
+        for (size_t i = 0; i < 32; ++i) {
+            km[i] ^= token_bytes[i % 8];
+            km[i] = std::rotl(km[i], 3);
+            km[i] = static_cast<uint8_t>(km[i] + ((i * 31u + 7u) & 0xFF));
+            km[i] ^= km[(i + 13) % 32];
+        }
+        for (int round = 0; round < 4; ++round) {
+            for (size_t i = 0; i < 32; ++i) {
+                km[i] ^= km[(i + 1) % 32];
+                km[i] = std::rotl(km[i], 5);
+                km[i] = static_cast<uint8_t>(km[i] + km[(i + 11) % 32]);
+            }
+        }
+
+        std::copy(km.begin(), km.end(), m_key.begin());
+        for (size_t i = 0; i < 12; ++i) m_nonce[i] = static_cast<uint8_t>(km[i] ^ km[i + 20]);
+
+        m_counter = 0;
+        m_initial_counter = 0;
+        m_direction = 1;
+        m_cache_index = 0;
+        m_cache_forward.clear();
+        m_cache_backward.clear();
+        m_ep_position = 0;
+        init_state();
+        generate_block_forward();
+        m_is_seeded = true;
+    }
+
     void set_direction_forward() {
         std::unique_lock lock(m_mutex);
         if (m_direction == -1) {
@@ -1413,18 +1675,18 @@ public:
         if (m_direction == 1) {
             if (m_cache_index >= m_cache_forward.size()) {
                 generate_block_forward();
+                m_cache_index = 0;   // refilled cache starts over; index must follow
             }
             advance_electronic_password();
             return m_cache_forward[m_cache_index++];
         } else {
             if (m_cache_index >= m_cache_backward.size()) {
                 generate_block_backward();
+                m_cache_index = 0;   // refilled cache starts over
+                if (m_cache_backward.empty()) return 0;
             }
             advance_electronic_password();
-            if (!m_cache_backward.empty()) {
-                return m_cache_backward[m_cache_index++];
-            }
-            return 0;
+            return m_cache_backward[m_cache_index++];
         }
     }
     
@@ -1581,61 +1843,89 @@ public:
 class SquareTransform : public ShapeTransform {
 public:
     explicit SquareTransform(const DistributionParams& params = DistributionParams()) : ShapeTransform(params) {}
-    void transform(container_t& data, ShapeContext& ctx) override {
-        size_t total = ctx.total_elements;
-        size_t side = static_cast<size_t>(std::sqrt(total));
+    // Row/column swaps are involutions, but the sequence is not: it is replayed in
+    // reverse order on the way back.
+    void collect_ops(ShapeContext& ctx, std::vector<std::pair<int, std::pair<size_t, size_t>>>& ops) {
+        size_t side = static_cast<size_t>(std::sqrt(ctx.total_elements));
         if (side < 2) return;
-        Grid2D grid(total);
-        size_t ops = static_cast<size_t>(side * ctx.params.subdivision_percentage / 100.0);
-        ops = std::max(ops, size_t(2));
-        for (size_t op = 0; op < ops; ++op) {
-            int type = ctx.prng.generate_range_i64(0, 1);
-            if (type == 0) {
-                size_t r1 = ctx.prng.generate_range_u64(0, side - 1);
-                size_t r2 = ctx.prng.generate_range_u64(0, side - 1);
-                if (r1 != r2) grid.swap_rows(r1, r2, data);
-            } else {
-                size_t c1 = ctx.prng.generate_range_u64(0, side - 1);
-                size_t c2 = ctx.prng.generate_range_u64(0, side - 1);
-                if (c1 != c2) grid.swap_columns(c1, c2, data);
-            }
+        size_t count = static_cast<size_t>(side * ctx.params.subdivision_percentage / 100.0);
+        count = std::max(count, size_t(2));
+        for (size_t op = 0; op < count; ++op) {
+            int type = static_cast<int>(ctx.prng.generate_range_i64(0, 1));
+            size_t a = ctx.prng.generate_range_u64(0, side - 1);
+            size_t b = ctx.prng.generate_range_u64(0, side - 1);
+            if (a != b) ops.push_back({type, {a, b}});
         }
     }
-    void inverse_transform(container_t& data, ShapeContext& ctx) override { transform(data, ctx); }
+    void apply_ops(container_t& data, ShapeContext& ctx,
+                   const std::vector<std::pair<int, std::pair<size_t, size_t>>>& ops, bool reverse) {
+        Grid2D grid(ctx.total_elements);
+        auto run = [&](const std::pair<int, std::pair<size_t, size_t>>& op) {
+            if (op.first == 0) grid.swap_rows(op.second.first, op.second.second, data);
+            else grid.swap_columns(op.second.first, op.second.second, data);
+        };
+        if (reverse) {
+            for (size_t i = ops.size(); i-- > 0;) run(ops[i]);
+        } else {
+            for (const auto& op : ops) run(op);
+        }
+    }
+    void transform(container_t& data, ShapeContext& ctx) override {
+        std::vector<std::pair<int, std::pair<size_t, size_t>>> ops;
+        collect_ops(ctx, ops);
+        apply_ops(data, ctx, ops, false);
+    }
+    void inverse_transform(container_t& data, ShapeContext& ctx) override {
+        std::vector<std::pair<int, std::pair<size_t, size_t>>> ops;
+        collect_ops(ctx, ops);
+        apply_ops(data, ctx, ops, true);
+    }
     std::string name() const override { return "SquareTransform"; }
 };
 
 class CircleTransform : public ShapeTransform {
 public:
     explicit CircleTransform(const DistributionParams& params = DistributionParams()) : ShapeTransform(params) {}
-    void transform(container_t& data, ShapeContext& ctx) override {
-        size_t total = ctx.total_elements;
-        size_t side = static_cast<size_t>(std::sqrt(total));
+    void rings(ShapeContext& ctx, std::vector<std::vector<size_t>>& out) {
+        size_t side = static_cast<size_t>(std::sqrt(ctx.total_elements));
         if (side < 4) return;
-        Grid2D grid(total);
+        Grid2D grid(ctx.total_elements);
         size_t radius_count = static_cast<size_t>(side / 2 * ctx.params.subdivision_percentage / 100.0);
         radius_count = std::max(radius_count, size_t(2));
         for (size_t r = 1; r <= radius_count; ++r) {
             std::vector<size_t> indices;
             for (int angle = 0; angle < 360; angle += 10) {
                 double rad = angle * M_PI / 180.0;
-                int x = static_cast<int>(side/2 + r * std::cos(rad));
-                int y = static_cast<int>(side/2 + r * std::sin(rad));
+                int x = static_cast<int>(side / 2 + static_cast<double>(r) * std::cos(rad));
+                int y = static_cast<int>(side / 2 + static_cast<double>(r) * std::sin(rad));
                 if (grid.is_valid(x, y)) indices.push_back(grid.index(x, y));
             }
-            if (indices.size() > 1) {
-                int64_t shift = ctx.prng.generate_range_i64(1, indices.size() - 1);
-                if (ctx.prng.generate_bool(0.5)) shift = -shift;
-                std::vector<uint64_t> values;
-                for (size_t idx : indices) values.push_back(data.get_element(idx));
-                for (size_t i = 0; i < indices.size(); ++i) {
-                    size_t new_idx = indices[(i + shift + indices.size()) % indices.size()];
-                    data.set_element(new_idx, values[i]);
-                }
+            std::sort(indices.begin(), indices.end());
+            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+            if (indices.size() > 1) out.push_back(std::move(indices));
+        }
+    }
+
+    void rotate_rings(container_t& data, ShapeContext& ctx, bool inverse) {
+        std::vector<std::vector<size_t>> ring_list;
+        rings(ctx, ring_list);
+        for (auto& indices : ring_list) {
+            size_t len = indices.size();
+            int64_t shift = ctx.prng.generate_range_i64(1, static_cast<int64_t>(len) - 1);
+            if (ctx.prng.generate_bool(0.5)) shift = -shift;
+            if (inverse) shift = -shift;
+            std::vector<uint64_t> values;
+            values.reserve(len);
+            for (size_t idx : indices) values.push_back(data.get_element(idx));
+            for (size_t i = 0; i < len; ++i) {
+                size_t new_idx = indices[(i + shift + static_cast<int64_t>(len)) % static_cast<int64_t>(len)];
+                data.set_element(new_idx, values[i]);
             }
         }
     }
-    void inverse_transform(container_t& data, ShapeContext& ctx) override { transform(data, ctx); }
+
+    void transform(container_t& data, ShapeContext& ctx) override { rotate_rings(data, ctx, false); }
+    void inverse_transform(container_t& data, ShapeContext& ctx) override { rotate_rings(data, ctx, true); }
     std::string name() const override { return "CircleTransform"; }
 };
 
@@ -1946,79 +2236,289 @@ private:
     }
     
     // ============================================================================
-    // Core Operation Implementations (All Reversible)
+    // Reversible Operation Core
     // ============================================================================
-    
+    //
+    // Design rule: every operation must be a bijection on the element vector for
+    // a given keystream. Before each operation - during encryption and during
+    // decryption alike - the PRNG is reseeded with a token derived from that
+    // operation's position in the Operations pack (see run_forward/run_inverse).
+    // Forward and inverse therefore see identical randomness, so an inverse only
+    // has to undo the maths and never has to rewind the stream.
+    // ============================================================================
+
+    static uint64_t element_mask(size_t bits) {
+        return (bits >= 64) ? ~uint64_t(0) : ((uint64_t(1) << bits) - 1);
+    }
+
+    // Multiplicative inverse modulo 2^64 for odd a (Newton iteration, doubles bits).
+    static uint64_t mod_inverse_odd(uint64_t a) {
+        uint64_t x = a;
+        for (int i = 0; i < 6; ++i) x *= 2 - a * x;
+        return x;
+    }
+
+    // Rotations must stay inside the element width: a 64-bit std::rotl followed by
+    // masking silently discards bits for narrow modes (1/2/3/4/5/6/8/16/32).
+    static uint64_t rotl_within(uint64_t v, unsigned r, size_t bits) {
+        if (bits == 0) return v;
+        r %= static_cast<unsigned>(bits);
+        if (r == 0) return v;
+        uint64_t mask = element_mask(bits);
+        v &= mask;
+        return ((v << r) | (v >> (bits - r))) & mask;
+    }
+
+    static uint64_t rotr_within(uint64_t v, unsigned r, size_t bits) {
+        if (bits == 0) return v;
+        r %= static_cast<unsigned>(bits);
+        if (r == 0) return v;
+        uint64_t mask = element_mask(bits);
+        v &= mask;
+        return ((v >> r) | (v << (bits - r))) & mask;
+    }
+
+    static uint64_t mix64(uint64_t z) {
+        z += 0x9E3779B97F4A7C15ULL;
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+        return z ^ (z >> 31);
+    }
+
+    // Inverse of y = x ^ (x << k), rebuilt from the low bits upward.
+    static uint64_t undo_xorshift_left(uint64_t y, unsigned k) {
+        uint64_t x = 0;
+        for (unsigned i = 0; i < 64; ++i) {
+            uint64_t prev = (i >= k) ? ((x >> (i - k)) & 1ULL) : 0ULL;
+            if (((y >> i) & 1ULL) ^ prev) x |= (1ULL << i);
+        }
+        return x;
+    }
+
+    // Inverse of y = x ^ (x >> k), rebuilt from the high bits downward.
+    static uint64_t undo_xorshift_right(uint64_t y, unsigned k) {
+        uint64_t x = 0;
+        for (int i = 63; i >= 0; --i) {
+            uint64_t next = (i + static_cast<int>(k) < 64) ? ((x >> (i + k)) & 1ULL) : 0ULL;
+            if (((y >> i) & 1ULL) ^ next) x |= (1ULL << i);
+        }
+        return x;
+    }
+
+    // Inverse of y = x + (x >> k): strictly increasing, solved by contraction.
+    static uint64_t undo_add_shift_right(uint64_t y, unsigned k) {
+        uint64_t x = y;
+        for (int i = 0; i < 80; ++i) x = y - (x >> k);
+        return x;
+    }
+
+    // ---------------------------------------------------------------------------
+    // Permutation helpers
+    // ---------------------------------------------------------------------------
+
+    // out[perm[i]] = in[i]
+    void perm_apply(container_t& d, const std::vector<uint64_t>& perm) {
+        size_t n = perm.size();
+        std::vector<uint64_t> vals(n);
+        for (size_t i = 0; i < n; ++i) vals[perm[i]] = d.get_element(i);
+        for (size_t i = 0; i < n; ++i) d.set_element(i, vals[i]);
+    }
+
+    // in[i] = out[perm[i]]
+    void perm_unapply(container_t& d, const std::vector<uint64_t>& perm) {
+        size_t n = perm.size();
+        std::vector<uint64_t> vals(n);
+        for (size_t i = 0; i < n; ++i) vals[i] = d.get_element(perm[i]);
+        for (size_t i = 0; i < n; ++i) d.set_element(i, vals[i]);
+    }
+
+    std::vector<uint64_t> fisher_yates(size_t n) {
+        std::vector<uint64_t> perm(n);
+        for (size_t i = 0; i < n; ++i) perm[i] = static_cast<uint64_t>(i);
+        for (size_t i = n; i-- > 1;) {
+            size_t j = m_prng.generate_range_u64(0, i);
+            std::swap(perm[i], perm[j]);
+        }
+        return perm;
+    }
+
+    // ---------------------------------------------------------------------------
+    // AES substitution tables, generated so both directions are exact inverses
+    // ---------------------------------------------------------------------------
+
+    static uint8_t gf_mul(uint8_t a, uint8_t b) {
+        uint8_t p = 0;
+        for (int i = 0; i < 8; ++i) {
+            if (b & 1) p ^= a;
+            uint8_t hi = static_cast<uint8_t>(a & 0x80);
+            a = static_cast<uint8_t>(a << 1);
+            if (hi) a ^= 0x1B;
+            b = static_cast<uint8_t>(b >> 1);
+        }
+        return p;
+    }
+
+    static uint8_t gf_pow(uint8_t a, uint8_t e) {
+        uint8_t r = 1;
+        while (e) {
+            if (e & 1) r = gf_mul(r, a);
+            a = gf_mul(a, a);
+            e = static_cast<uint8_t>(e >> 1);
+        }
+        return r;
+    }
+
+    static const std::array<uint8_t, 256>& aes_sbox() {
+        static const std::array<uint8_t, 256> box = []() {
+            std::array<uint8_t, 256> s{};
+            for (int i = 0; i < 256; ++i) {
+                uint8_t inv = (i == 0) ? uint8_t(0) : gf_pow(static_cast<uint8_t>(i), 254);
+                uint8_t y = 0x63;
+                for (int b = 0; b < 5; ++b) {
+                    uint8_t rot = static_cast<uint8_t>(((inv << b) | (inv >> (8 - b))) & 0xFF);
+                    y ^= rot;
+                }
+                s[i] = y;
+            }
+            return s;
+        }();
+        return box;
+    }
+
+    static const std::array<uint8_t, 256>& aes_inv_sbox() {
+        static const std::array<uint8_t, 256> inv = []() {
+            std::array<uint8_t, 256> r{};
+            const auto& s = aes_sbox();
+            for (int i = 0; i < 256; ++i) r[s[i]] = static_cast<uint8_t>(i);
+            return r;
+        }();
+        return inv;
+    }
+
+    // ============================================================================
+    // Positional Operations
+    // ============================================================================
+
     void apply_scatter(container_t& data) {
         for (size_t pass = 0; pass < m_settings.scatter_passes; ++pass) {
             size_t n = data.element_count();
-            auto perm = m_prng.generate_permutation(n);
-            std::vector<uint64_t> values(n);
-            for (size_t i = 0; i < n; ++i) values[perm[i]] = data.get_element(i);
-            for (size_t i = 0; i < n; ++i) data.set_element(i, values[i]);
+            if (n < 2) return;
+            perm_apply(data, m_prng.generate_permutation(n));
         }
     }
-    
+
+    void unapply_scatter(container_t& data) {
+        std::vector<std::vector<uint64_t>> perms;
+        for (size_t pass = 0; pass < m_settings.scatter_passes; ++pass) {
+            size_t n = data.element_count();
+            if (n < 2) return;
+            perms.push_back(m_prng.generate_permutation(n));
+        }
+        for (size_t k = perms.size(); k-- > 0;) perm_unapply(data, perms[k]);
+    }
+
     void apply_shuffle(container_t& data) {
         for (size_t pass = 0; pass < m_settings.shuffle_passes; ++pass) {
             size_t n = data.element_count();
-            for (size_t i = 0; i < n * 2; ++i) {
-                size_t a = m_prng.generate_range_u64(0, n - 1);
-                size_t b = m_prng.generate_range_u64(0, n - 1);
-                if (a != b) {
-                    uint64_t va = data.get_element(a);
-                    uint64_t vb = data.get_element(b);
-                    data.set_element(a, vb);
-                    data.set_element(b, va);
-                }
-            }
+            if (n < 2) return;
+            perm_apply(data, fisher_yates(n));
         }
     }
-    
-    void apply_diffuse(container_t& data) {
-        for (size_t round = 0; round < m_settings.diffusion_rounds; ++round) {
+
+    void unapply_shuffle(container_t& data) {
+        std::vector<std::vector<uint64_t>> perms;
+        for (size_t pass = 0; pass < m_settings.shuffle_passes; ++pass) {
             size_t n = data.element_count();
-            for (size_t i = 0; i < n; ++i) {
-                uint64_t v = data.get_element(i);
-                size_t j = (i * 13 + round * 7) % n;
-                uint64_t curr = data.get_element(j);
-                data.set_element(j, curr ^ (v << (i % 17)));
+            if (n < 2) return;
+            perms.push_back(fisher_yates(n));
+        }
+        for (size_t k = perms.size(); k-- > 0;) perm_unapply(data, perms[k]);
+    }
+
+    // Cumulative chain in both directions: one changed element reaches every other
+    // element within a single round. The previous one-step neighbour XOR diffused a
+    // single position per round, which is why a one-bit change barely spread.
+    void apply_diffuse(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        for (size_t round = 0; round < m_settings.diffusion_rounds; ++round) {
+            for (size_t i = 1; i < n; ++i) {
+                data.set_element(i, data.get_element(i) ^ data.get_element(i - 1));
+            }
+            for (size_t i = n - 1; i-- > 0;) {
+                data.set_element(i, data.get_element(i) ^ data.get_element(i + 1));
             }
         }
     }
-    
+
+    void unapply_diffuse(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        for (size_t round = m_settings.diffusion_rounds; round-- > 0;) {
+            for (size_t i = 0; i + 1 < n; ++i) {
+                data.set_element(i, data.get_element(i) ^ data.get_element(i + 1));
+            }
+            for (size_t i = n; i-- > 1;) {
+                data.set_element(i, data.get_element(i) ^ data.get_element(i - 1));
+            }
+        }
+    }
+
     void apply_mix(container_t& data) {
         for (size_t i = 0; i < data.element_count(); ++i) {
             data.set_element(i, data.get_element(i) ^ m_prng.generate_u64());
         }
     }
-    
+
     void apply_permute(container_t& data) {
-        size_t block_size = std::max<size_t>(1, data.element_count() / 16);
-        for (size_t block = 0; block < data.element_count(); block += block_size) {
-            size_t end = std::min(block + block_size, data.element_count());
-            for (size_t i = block; i < end - 1; ++i) {
-                size_t j = m_prng.generate_range_u64(i, end - 1);
-                if (i != j) {
-                    uint64_t vi = data.get_element(i);
-                    uint64_t vj = data.get_element(j);
-                    data.set_element(i, vj);
-                    data.set_element(j, vi);
-                }
-            }
+        size_t n = data.element_count();
+        if (n < 2) return;
+        size_t block = std::max<size_t>(2, n / 16);
+        for (size_t b = 0; b < n; b += block) {
+            size_t len = std::min(block, n - b);
+            if (len < 2) continue;
+            auto perm = fisher_yates(len);
+            std::vector<uint64_t> vals(len);
+            for (size_t i = 0; i < len; ++i) vals[perm[i]] = data.get_element(b + i);
+            for (size_t i = 0; i < len; ++i) data.set_element(b + i, vals[i]);
         }
     }
-    
+
+    void unapply_permute(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        size_t block = std::max<size_t>(2, n / 16);
+        for (size_t b = 0; b < n; b += block) {
+            size_t len = std::min(block, n - b);
+            if (len < 2) continue;
+            auto perm = fisher_yates(len);
+            std::vector<uint64_t> vals(len);
+            for (size_t i = 0; i < len; ++i) vals[i] = data.get_element(b + perm[i]);
+            for (size_t i = 0; i < len; ++i) data.set_element(b + i, vals[i]);
+        }
+    }
+
     void apply_rotate(container_t& data) {
         if (!m_settings.enable_rotation) return;
-        size_t shift = m_prng.generate_range_u64(1, data.element_count() - 1);
-        std::vector<uint64_t> values(data.element_count());
-        for (size_t i = 0; i < data.element_count(); ++i) {
-            values[(i + shift) % data.element_count()] = data.get_element(i);
-        }
-        for (size_t i = 0; i < data.element_count(); ++i) data.set_element(i, values[i]);
+        size_t n = data.element_count();
+        if (n < 2) return;
+        size_t shift = m_prng.generate_range_u64(1, n - 1);
+        std::vector<uint64_t> values(n);
+        for (size_t i = 0; i < n; ++i) values[(i + shift) % n] = data.get_element(i);
+        for (size_t i = 0; i < n; ++i) data.set_element(i, values[i]);
     }
-    
+
+    void unapply_rotate(container_t& data) {
+        if (!m_settings.enable_rotation) return;
+        size_t n = data.element_count();
+        if (n < 2) return;
+        size_t shift = m_prng.generate_range_u64(1, n - 1);
+        size_t inv_shift = (n - shift) % n;
+        std::vector<uint64_t> values(n);
+        for (size_t i = 0; i < n; ++i) values[(i + inv_shift) % n] = data.get_element(i);
+        for (size_t i = 0; i < n; ++i) data.set_element(i, values[i]);
+    }
+
     void apply_flip(container_t& data) {
         if (!m_settings.enable_flip) return;
         size_t n = data.element_count();
@@ -2030,50 +2530,50 @@ private:
             data.set_element(j, vi);
         }
     }
-    
+
     void apply_swap(container_t& data) {
-        size_t block_size = std::max<size_t>(1, data.element_count() / 8);
-        for (size_t i = 0; i < data.element_count() - block_size; i += block_size * 2) {
-            if (i + block_size * 2 <= data.element_count()) {
-                for (size_t j = 0; j < block_size; ++j) {
-                    size_t a = i + j, b = i + block_size + j;
-                    uint64_t va = data.get_element(a);
-                    uint64_t vb = data.get_element(b);
-                    data.set_element(a, vb);
-                    data.set_element(b, va);
-                }
+        size_t n = data.element_count();
+        if (n < 2) return;
+        size_t block_size = std::max<size_t>(1, n / 8);
+        for (size_t i = 0; i + block_size * 2 <= n; i += block_size * 2) {
+            for (size_t j = 0; j < block_size; ++j) {
+                size_t a = i + j, b = i + block_size + j;
+                uint64_t va = data.get_element(a);
+                uint64_t vb = data.get_element(b);
+                data.set_element(a, vb);
+                data.set_element(b, va);
             }
         }
     }
-    
+
     // ============================================================================
-    // Bitwise Operations (Reversible)
+    // Bitwise Operations
     // ============================================================================
-    
+
     void apply_bitwise_not(container_t& data) {
         for (size_t i = 0; i < data.element_count(); ++i) {
             data.set_element(i, ~data.get_element(i));
         }
     }
-    
+
     void apply_bitwise_rotl(container_t& data) {
         size_t bits = bit_mode_to_size(data.global_mode());
+        if (bits < 2) return;
         for (size_t i = 0; i < data.element_count(); ++i) {
-            uint64_t val = data.get_element(i);
-            uint8_t rot = static_cast<uint8_t>(m_prng.generate_range_u64(1, bits - 1));
-            data.set_element(i, std::rotl(val, rot));
+            unsigned rot = static_cast<unsigned>(m_prng.generate_range_u64(1, bits - 1));
+            data.set_element(i, rotl_within(data.get_element(i), rot, bits));
         }
     }
-    
+
     void apply_bitwise_rotr(container_t& data) {
         size_t bits = bit_mode_to_size(data.global_mode());
+        if (bits < 2) return;
         for (size_t i = 0; i < data.element_count(); ++i) {
-            uint64_t val = data.get_element(i);
-            uint8_t rot = static_cast<uint8_t>(m_prng.generate_range_u64(1, bits - 1));
-            data.set_element(i, std::rotr(val, rot));
+            unsigned rot = static_cast<unsigned>(m_prng.generate_range_u64(1, bits - 1));
+            data.set_element(i, rotr_within(data.get_element(i), rot, bits));
         }
     }
-    
+
     void apply_bitwise_reverse(container_t& data) {
         size_t bits = bit_mode_to_size(data.global_mode());
         for (size_t i = 0; i < data.element_count(); ++i) {
@@ -2085,533 +2585,917 @@ private:
             data.set_element(i, rev);
         }
     }
-    
+
     void apply_bitwise_swap_nibbles(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        if (bits < 2) return;
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
-            uint64_t swapped = ((val & 0x0F0F0F0F0F0F0F0FULL) << 4) |
-                               ((val & 0xF0F0F0F0F0F0F0F0ULL) >> 4);
-            data.set_element(i, swapped);
+            if (bits >= 8) {
+                val = ((val & 0x0F0F0F0F0F0F0F0FULL) << 4) | ((val & 0xF0F0F0F0F0F0F0F0ULL) >> 4);
+            } else {
+                // Rotating by half the width is only an involution for even widths,
+                // so narrow modes get an explicit inverse below.
+                val = rotl_within(val, static_cast<unsigned>(bits / 2), bits);
+            }
+            data.set_element(i, val);
         }
     }
-    
+
+    void unapply_bitwise_swap_nibbles(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        if (bits < 2) return;
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t val = data.get_element(i);
+            if (bits >= 8) {
+                val = ((val & 0x0F0F0F0F0F0F0F0FULL) << 4) | ((val & 0xF0F0F0F0F0F0F0F0ULL) >> 4);
+            } else {
+                val = rotr_within(val, static_cast<unsigned>(bits / 2), bits);
+            }
+            data.set_element(i, val);
+        }
+    }
+
     void apply_bitwise_gray_code(container_t& data) {
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
             data.set_element(i, val ^ (val >> 1));
         }
     }
-    
+
+    void unapply_bitwise_gray_code(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t x = data.get_element(i);
+            for (size_t s = 1; s < bits; s <<= 1) x ^= (x >> s);
+            data.set_element(i, x);
+        }
+    }
+
     void apply_bitwise_xor(container_t& data) {
         for (size_t i = 0; i < data.element_count(); ++i) {
             data.set_element(i, data.get_element(i) ^ m_prng.generate_u64());
         }
     }
-    
+
+    // Invertible bit-mixing stand-in for AND (multiplication by an odd constant is
+    // a bijection modulo 2^bits).
     void apply_bitwise_and(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t mask = element_mask(bits);
         for (size_t i = 0; i < data.element_count(); ++i) {
-            data.set_element(i, data.get_element(i) & m_prng.generate_u64());
+            uint64_t k = (m_prng.generate_u64() | 1ULL) & mask;
+            if (k == 0) k = 1;
+            data.set_element(i, (data.get_element(i) * k) & mask);
         }
     }
-    
+
+    void unapply_bitwise_and(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t mask = element_mask(bits);
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t k = (m_prng.generate_u64() | 1ULL) & mask;
+            if (k == 0) k = 1;
+            data.set_element(i, (data.get_element(i) * mod_inverse_odd(k)) & mask);
+        }
+    }
+
+    // Invertible bit-mixing stand-in for OR (position-rotated keystream XOR).
     void apply_bitwise_or(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        if (bits < 1) return;
         for (size_t i = 0; i < data.element_count(); ++i) {
-            data.set_element(i, data.get_element(i) | m_prng.generate_u64());
+            unsigned rot = static_cast<unsigned>(i % bits);
+            uint64_t k = std::rotl(m_prng.generate_u64(), static_cast<int>(rot));
+            data.set_element(i, data.get_element(i) ^ k);
         }
     }
-    
+
     // ============================================================================
-    // Arithmetic Operations (Reversible with inverse operations)
+    // Arithmetic Operations (modulo 2^bits, odd multipliers keep them invertible)
     // ============================================================================
-    
+
     void apply_arithmetic_negate(container_t& data) {
         for (size_t i = 0; i < data.element_count(); ++i) {
-            int64_t val = static_cast<int64_t>(data.get_element(i));
-            data.set_element(i, static_cast<uint64_t>(-val));
+            data.set_element(i, static_cast<uint64_t>(0) - data.get_element(i));
         }
     }
-    
+
     void apply_arithmetic_add(container_t& data) {
         for (size_t i = 0; i < data.element_count(); ++i) {
             data.set_element(i, data.get_element(i) + m_prng.generate_range_u64(1, 255));
         }
     }
-    
+
     void apply_arithmetic_sub(container_t& data) {
         for (size_t i = 0; i < data.element_count(); ++i) {
             data.set_element(i, data.get_element(i) - m_prng.generate_range_u64(1, 255));
         }
     }
-    
+
     void apply_arithmetic_mul(container_t& data) {
-        for (size_t i = 0; i < data.element_count(); ++i) {
-            data.set_element(i, data.get_element(i) * m_prng.generate_range_u64(2, 255));
-        }
-    }
-    
-    void apply_arithmetic_div(container_t& data) {
-        for (size_t i = 0; i < data.element_count(); ++i) {
-            uint64_t divisor = m_prng.generate_range_u64(2, 255);
-            data.set_element(i, data.get_element(i) / divisor);
-        }
-    }
-    
-    // ============================================================================
-    // Byte/Word Operations (Reversible)
-    // ============================================================================
-    
-    void apply_byte_swap(container_t& data) {
         size_t bits = bit_mode_to_size(data.global_mode());
-        size_t bytes = bits / 8;
+        uint64_t mask = element_mask(bits);
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t k = m_prng.generate_range_u64(1, 255) | 1ULL;
+            data.set_element(i, (data.get_element(i) * k) & mask);
+        }
+    }
+
+    void unapply_arithmetic_mul(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t mask = element_mask(bits);
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t k = m_prng.generate_range_u64(1, 255) | 1ULL;
+            data.set_element(i, (data.get_element(i) * mod_inverse_odd(k)) & mask);
+        }
+    }
+
+    void apply_arithmetic_div(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t mask = element_mask(bits);
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t k = m_prng.generate_range_u64(1, 255) | 1ULL;
+            data.set_element(i, (data.get_element(i) * mod_inverse_odd(k)) & mask);
+        }
+    }
+
+    void unapply_arithmetic_div(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t mask = element_mask(bits);
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t k = m_prng.generate_range_u64(1, 255) | 1ULL;
+            data.set_element(i, (data.get_element(i) * k) & mask);
+        }
+    }
+
+    // ============================================================================
+    // Byte / Word Operations
+    // ============================================================================
+
+    void apply_byte_swap(container_t& data) {
+        size_t bytes = bit_mode_to_size(data.global_mode()) / 8;
         if (bytes < 2) return;
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
             uint64_t swapped = 0;
             for (size_t b = 0; b < bytes; ++b) {
-                uint8_t byte_val = (val >> (b * 8)) & 0xFF;
+                uint8_t byte_val = static_cast<uint8_t>((val >> (b * 8)) & 0xFF);
                 swapped |= static_cast<uint64_t>(byte_val) << ((bytes - 1 - b) * 8);
             }
             data.set_element(i, swapped);
         }
     }
-    
+
     void apply_byte_reverse(container_t& data) {
+        if (bit_mode_to_size(data.global_mode()) < 8) return;
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
             uint64_t rev = 0;
             for (int b = 0; b < 8; ++b) {
-                uint8_t byte_val = (val >> (b * 8)) & 0xFF;
+                uint8_t byte_val = static_cast<uint8_t>((val >> (b * 8)) & 0xFF);
                 uint8_t rev_byte = 0;
                 for (int bit = 0; bit < 8; ++bit) {
-                    if (byte_val & (1 << bit)) rev_byte |= (1 << (7 - bit));
+                    if (byte_val & (1 << bit)) rev_byte = static_cast<uint8_t>(rev_byte | (1 << (7 - bit)));
                 }
                 rev |= static_cast<uint64_t>(rev_byte) << (b * 8);
             }
             data.set_element(i, rev);
         }
     }
-    
+
     void apply_byte_rotate(container_t& data) {
         size_t bytes = bit_mode_to_size(data.global_mode()) / 8;
         if (bytes < 2) return;
-        uint8_t rot = static_cast<uint8_t>(m_prng.generate_range_u64(1, bytes - 1));
+        unsigned rot = static_cast<unsigned>(m_prng.generate_range_u64(1, bytes - 1));
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
             uint64_t rotated = 0;
             for (size_t b = 0; b < bytes; ++b) {
-                size_t src = (b + rot) % bytes;
-                uint8_t byte_val = (val >> (src * 8)) & 0xFF;
+                size_t src = (b + bytes - rot) % bytes;
+                uint8_t byte_val = static_cast<uint8_t>((val >> (src * 8)) & 0xFF);
                 rotated |= static_cast<uint64_t>(byte_val) << (b * 8);
             }
             data.set_element(i, rotated);
         }
     }
-    
+
+    void unapply_byte_rotate(container_t& data) {
+        size_t bytes = bit_mode_to_size(data.global_mode()) / 8;
+        if (bytes < 2) return;
+        unsigned rot = static_cast<unsigned>(m_prng.generate_range_u64(1, bytes - 1));
+        unsigned inv_rot = static_cast<unsigned>((bytes - rot) % bytes);
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t val = data.get_element(i);
+            uint64_t rotated = 0;
+            for (size_t b = 0; b < bytes; ++b) {
+                size_t src = (b + bytes - inv_rot) % bytes;
+                uint8_t byte_val = static_cast<uint8_t>((val >> (src * 8)) & 0xFF);
+                rotated |= static_cast<uint64_t>(byte_val) << (b * 8);
+            }
+            data.set_element(i, rotated);
+        }
+    }
+
     void apply_word_swap(container_t& data) {
         size_t bits = bit_mode_to_size(data.global_mode());
         if (bits < 32) return;
+        size_t half = bits / 2;
+        uint64_t hmask = element_mask(half);
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
-            uint32_t low = static_cast<uint32_t>(val & 0xFFFFFFFF);
-            uint32_t high = static_cast<uint32_t>((val >> 32) & 0xFFFFFFFF);
-            data.set_element(i, (static_cast<uint64_t>(low) << 32) | high);
+            uint64_t low = val & hmask;
+            uint64_t high = (val >> half) & hmask;
+            data.set_element(i, (low << half) | high);
         }
     }
-    
+
     void apply_word_mix(container_t& data) {
         size_t bits = bit_mode_to_size(data.global_mode());
         if (bits < 32) return;
+        size_t half = bits / 2;
+        uint64_t hmask = element_mask(half);
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
-            uint32_t low = static_cast<uint32_t>(val & 0xFFFFFFFF);
-            uint32_t high = static_cast<uint32_t>((val >> 32) & 0xFFFFFFFF);
-            uint32_t mixed_low = low ^ high;
-            uint32_t mixed_high = high ^ (mixed_low << 1);
-            data.set_element(i, (static_cast<uint64_t>(mixed_high) << 32) | mixed_low);
+            uint64_t low = val & hmask;
+            uint64_t high = (val >> half) & hmask;
+            uint64_t mixed_low = (low ^ high) & hmask;
+            uint64_t mixed_high = (high ^ ((mixed_low << 1) & hmask)) & hmask;
+            data.set_element(i, (mixed_high << half) | mixed_low);
         }
     }
-    
-    // ============================================================================
-    // Transform Operations (Reversible)
-    // ============================================================================
-    
-    void apply_transform_xorshift(container_t& data) {
+
+    void unapply_word_mix(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        if (bits < 32) return;
+        size_t half = bits / 2;
+        uint64_t hmask = element_mask(half);
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
-            val ^= val << 13; val ^= val >> 7; val ^= val << 17;
+            uint64_t mixed_low = val & hmask;
+            uint64_t mixed_high = (val >> half) & hmask;
+            uint64_t high = (mixed_high ^ ((mixed_low << 1) & hmask)) & hmask;
+            uint64_t low = (mixed_low ^ high) & hmask;
+            data.set_element(i, (high << half) | low);
+        }
+    }
+
+    // ============================================================================
+    // Transform Operations
+    // ============================================================================
+
+    // Intermediate values are masked to the element width: a 64-bit mix truncated
+    // on write would destroy bits that the inverse needs to recover.
+    void apply_transform_xorshift(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t mask = element_mask(bits);
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t val = data.get_element(i) & mask;
+            val = (val ^ (val << 13)) & mask;
+            val = (val ^ (val >> 7)) & mask;
+            val = (val ^ (val << 17)) & mask;
             data.set_element(i, val);
         }
     }
-    
-    void apply_transform_chacha(container_t& data) {
-        for (size_t i = 0; i < data.element_count(); i += 4) {
-            if (i + 3 < data.element_count()) {
-                uint64_t a = data.get_element(i);
-                uint64_t b = data.get_element(i + 1);
-                uint64_t c = data.get_element(i + 2);
-                uint64_t d = data.get_element(i + 3);
-                a += b; d ^= a; d = std::rotl(d, 32);
-                c += d; b ^= c; b = std::rotl(b, 24);
-                a += b; d ^= a; d = std::rotl(d, 16);
-                c += d; b ^= c; b = std::rotl(b, 12);
-                data.set_element(i, a);
-                data.set_element(i + 1, b);
-                data.set_element(i + 2, c);
-                data.set_element(i + 3, d);
-            }
+
+    void unapply_transform_xorshift(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t mask = element_mask(bits);
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t val = data.get_element(i) & mask;
+            val = undo_xorshift_left(val, 17) & mask;
+            val = undo_xorshift_right(val, 7) & mask;
+            val = undo_xorshift_left(val, 13) & mask;
+            data.set_element(i, val);
         }
     }
-    
+
+    void apply_transform_chacha(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        for (size_t i = 0; i + 3 < data.element_count(); i += 4) {
+            uint64_t a = data.get_element(i);
+            uint64_t b = data.get_element(i + 1);
+            uint64_t c = data.get_element(i + 2);
+            uint64_t d = data.get_element(i + 3);
+            uint64_t m = element_mask(bits);
+            a = (a + b) & m; d = (d ^ a) & m; d = rotl_within(d, 32, bits);
+            c = (c + d) & m; b = (b ^ c) & m; b = rotl_within(b, 24, bits);
+            a = (a + b) & m; d = (d ^ a) & m; d = rotl_within(d, 16, bits);
+            c = (c + d) & m; b = (b ^ c) & m; b = rotl_within(b, 12, bits);
+            data.set_element(i, a);
+            data.set_element(i + 1, b);
+            data.set_element(i + 2, c);
+            data.set_element(i + 3, d);
+        }
+    }
+
+    void unapply_transform_chacha(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        for (size_t i = 0; i + 3 < data.element_count(); i += 4) {
+            uint64_t a = data.get_element(i);
+            uint64_t b = data.get_element(i + 1);
+            uint64_t c = data.get_element(i + 2);
+            uint64_t d = data.get_element(i + 3);
+            uint64_t m = element_mask(bits);
+            // Unwind the quarter round in exact reverse, keeping every value the
+            // next step still needs in its own temporary.
+            uint64_t b3 = rotr_within(b, 12, bits);
+            uint64_t b2 = (b3 ^ c) & m;
+            uint64_t c1 = (c - d) & m;
+            uint64_t d3 = rotr_within(d, 16, bits);
+            uint64_t d2 = (d3 ^ a) & m;
+            uint64_t a1 = (a - b2) & m;
+            uint64_t b1 = rotr_within(b2, 24, bits);
+            uint64_t b0 = (b1 ^ c1) & m;
+            uint64_t c0 = (c1 - d2) & m;
+            uint64_t d1 = rotr_within(d2, 32, bits);
+            uint64_t d0 = (d1 ^ a1) & m;
+            uint64_t a0 = (a1 - b0) & m;   // forward added b0, not b1
+            data.set_element(i, a0);
+            data.set_element(i + 1, b0);
+            data.set_element(i + 2, c0);
+            data.set_element(i + 3, d0);
+        }
+    }
+
     void apply_transform_aes(container_t& data) {
-        static const std::array<uint8_t, 256> sbox = []() {
-            std::array<uint8_t, 256> s{};
-            const uint8_t table[] = {
-                0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
-                0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0};
-            for (size_t i = 0; i < 256; ++i) s[i] = table[i % 32] ^ (i & 0xFF);
-            return s;
-        }();
+        if (bit_mode_to_size(data.global_mode()) < 8) return;
+        const auto& sbox = aes_sbox();
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t val = data.get_element(i);
-            uint64_t transformed = 0;
+            uint64_t out = 0;
             for (size_t b = 0; b < 8; ++b) {
-                uint8_t byte_val = (val >> (b * 8)) & 0xFF;
-                transformed |= static_cast<uint64_t>(sbox[byte_val]) << (b * 8);
+                uint8_t byte_val = static_cast<uint8_t>((val >> (b * 8)) & 0xFF);
+                out |= static_cast<uint64_t>(sbox[byte_val]) << (b * 8);
             }
-            data.set_element(i, transformed);
+            data.set_element(i, out);
         }
     }
-    
+
+    void unapply_transform_aes(container_t& data) {
+        if (bit_mode_to_size(data.global_mode()) < 8) return;
+        const auto& inv = aes_inv_sbox();
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t val = data.get_element(i);
+            uint64_t out = 0;
+            for (size_t b = 0; b < 8; ++b) {
+                uint8_t byte_val = static_cast<uint8_t>((val >> (b * 8)) & 0xFF);
+                out |= static_cast<uint64_t>(inv[byte_val]) << (b * 8);
+            }
+            data.set_element(i, out);
+        }
+    }
+
     // ============================================================================
-    // Mode Stack Operations (Reversible)
+    // Mode Stack Operations
     // ============================================================================
-    
+
+    static BitMode random_mode(uint64_t index) {
+        static const BitMode modes[] = {BitMode::BIT_1, BitMode::BIT_2, BitMode::BIT_3, BitMode::NIBBLE,
+                                        BitMode::BYTE, BitMode::WORD16, BitMode::WORD32, BitMode::WORD64};
+        return modes[index % 8];
+    }
+
     void apply_push_mode(container_t& data) {
-        BitMode modes[] = {BitMode::BIT_1, BitMode::BIT_2, BitMode::BIT_3, BitMode::NIBBLE,
-                           BitMode::BYTE, BitMode::WORD16, BitMode::WORD32, BitMode::WORD64};
-        BitMode m = modes[m_prng.generate_range_u64(0, 7)];
-        m_mode_stack.push_back(m);
+        (void)data;   // mode-stack operation: shares the operation signature only
+        m_mode_stack.push_back(random_mode(m_prng.generate_range_u64(0, 7)));
     }
-    
+
+    void unapply_push_mode(container_t& data) {
+        (void)data;   // mode-stack operation: shares the operation signature only
+        if (m_mode_stack.size() > 1) m_mode_stack.pop_back();
+    }
+
     void apply_pop_mode(container_t& data) {
-        if (!m_mode_stack.empty()) m_mode_stack.pop_back();
+        (void)data;   // mode-stack operation: shares the operation signature only
+        if (m_mode_stack.size() > 1) m_mode_stack.pop_back();
     }
-    
+
+    void unapply_pop_mode(container_t& data) {
+        (void)data;   // mode-stack operation: shares the operation signature only
+        m_mode_stack.push_back(random_mode(m_prng.generate_range_u64(0, 7)));
+    }
+
     void apply_switch_mode(container_t& data) {
+        (void)data;   // mode-stack operation: shares the operation signature only
         if (m_mode_stack.size() < 2) return;
         size_t i = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
         std::swap(m_mode_stack.back(), m_mode_stack[i]);
     }
-    
+
     void apply_mode_cycle(container_t& data) {
+        (void)data;   // mode-stack operation: shares the operation signature only
         if (m_mode_stack.empty()) return;
-        size_t s = m_prng.generate_range_u64(1, m_mode_stack.size());
+        size_t s = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
         std::rotate(m_mode_stack.begin(), m_mode_stack.begin() + s, m_mode_stack.end());
     }
-    
-    void apply_mode_feedback(container_t& data) {
+
+    void unapply_mode_cycle(container_t& data) {
+        (void)data;   // mode-stack operation: shares the operation signature only
         if (m_mode_stack.empty()) return;
-        uint64_t e = 0;
-        for (size_t i = 0; i < data.element_count() && i < 64; i += 4) {
-            e ^= data.get_element(i);
-        }
-        BitMode modes[] = {BitMode::BIT_1, BitMode::BIT_2, BitMode::BIT_3, BitMode::NIBBLE,
-                           BitMode::BYTE, BitMode::WORD16, BitMode::WORD32, BitMode::WORD64};
-        m_mode_stack.back() = modes[e % 8];
+        size_t s = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
+        size_t back = (m_mode_stack.size() - s) % m_mode_stack.size();
+        std::rotate(m_mode_stack.begin(), m_mode_stack.begin() + back, m_mode_stack.end());
     }
-    
+
+    // Derived from the keystream rather than from the data, so it stays reproducible.
+    void apply_mode_feedback(container_t& data) {
+        (void)data;   // mode-stack operation: shares the operation signature only
+        if (m_mode_stack.empty()) return;
+        m_mode_stack.back() = random_mode(m_prng.generate_u64());
+    }
+
     // ============================================================================
-    // Chunk Operations (Reversible)
+    // Chunk Operations
     // ============================================================================
-    
+
+    // Only whole chunks participate. A short trailing chunk used to be copied in
+    // full and silently truncated, which lost data whenever it was permuted away
+    // from its own slot.
     void apply_chunk_permute(container_t& data) {
         size_t n = data.element_count();
         const size_t chunk_size = 64;
-        size_t num_chunks = (n + chunk_size - 1) / chunk_size;
-        auto perm = m_prng.generate_permutation(num_chunks);
+        size_t full_chunks = n / chunk_size;
+        if (full_chunks < 2) return;
+        auto perm = m_prng.generate_permutation(full_chunks);
         std::vector<uint64_t> values(n);
-        for (size_t i = 0; i < num_chunks; ++i) {
+        for (size_t i = 0; i < n; ++i) values[i] = data.get_element(i);
+        for (size_t i = 0; i < full_chunks; ++i) {
             size_t src_start = perm[i] * chunk_size;
             size_t dst_start = i * chunk_size;
-            for (size_t j = 0; j < chunk_size && src_start + j < n && dst_start + j < n; ++j) {
-                values[dst_start + j] = data.get_element(src_start + j);
+            for (size_t j = 0; j < chunk_size; ++j) {
+                data.set_element(dst_start + j, values[src_start + j]);
             }
         }
-        for (size_t i = 0; i < n; ++i) data.set_element(i, values[i]);
     }
-    
+
+    void unapply_chunk_permute(container_t& data) {
+        size_t n = data.element_count();
+        const size_t chunk_size = 64;
+        size_t full_chunks = n / chunk_size;
+        if (full_chunks < 2) return;
+        auto perm = m_prng.generate_permutation(full_chunks);
+        std::vector<uint64_t> values(n);
+        for (size_t i = 0; i < n; ++i) values[i] = data.get_element(i);
+        for (size_t i = 0; i < full_chunks; ++i) {
+            size_t src_start = perm[i] * chunk_size;
+            size_t dst_start = i * chunk_size;
+            for (size_t j = 0; j < chunk_size; ++j) {
+                data.set_element(src_start + j, values[dst_start + j]);
+            }
+        }
+    }
+
     void apply_chunk_cascade(container_t& data) {
         size_t n = data.element_count();
         const size_t chunk_size = 32;
         for (size_t i = 0; i + chunk_size < n; i += chunk_size) {
-            for (size_t j = 0; j < chunk_size && i + j < n; ++j) {
-                uint64_t v = data.get_element(i + j);
-                uint64_t w = data.get_element((i + chunk_size + j) % n);
-                data.set_element(i + j, v ^ w);
+            for (size_t j = 0; j < chunk_size && i + chunk_size + j < n; ++j) {
+                data.set_element(i + j, data.get_element(i + j) ^ data.get_element(i + chunk_size + j));
             }
         }
     }
-    
+
+    void unapply_chunk_cascade(container_t& data) {
+        size_t n = data.element_count();
+        const size_t chunk_size = 32;
+        size_t last = 0;
+        while (last + chunk_size < n) last += chunk_size;
+        if (last == 0) return;
+        for (size_t i = last; i > 0; i -= chunk_size) {
+            for (size_t j = 0; j < chunk_size && i + chunk_size + j < n; ++j) {
+                data.set_element(i + j, data.get_element(i + j) ^ data.get_element(i + chunk_size + j));
+            }
+        }
+        for (size_t j = 0; j < chunk_size && 0 + chunk_size + j < n; ++j) {
+            data.set_element(j, data.get_element(j) ^ data.get_element(chunk_size + j));
+        }
+    }
+
     // ============================================================================
-    // Advanced Operations (Reversible)
+    // Advanced Operations
     // ============================================================================
-    
+
     void apply_cascade(container_t& data) {
         size_t n = data.element_count();
-        for (size_t i = 0; i < n - 1; ++i) {
-            uint64_t v = data.get_element(i);
-            uint64_t w = data.get_element(i + 1);
-            data.set_element(i + 1, w ^ v);
+        if (n < 2) return;
+        for (size_t i = 0; i + 1 < n; ++i) {
+            data.set_element(i + 1, data.get_element(i + 1) ^ data.get_element(i));
         }
     }
-    
+
+    void unapply_cascade(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        for (size_t i = n; i-- > 1;) {
+            data.set_element(i, data.get_element(i) ^ data.get_element(i - 1));
+        }
+    }
+
     void apply_spiral(container_t& data) {
         size_t n = data.element_count();
+        if (n < 2) return;
         for (size_t i = 0; i < n; ++i) {
-            size_t j = (i * 7) % n;
-            uint64_t v = data.get_element(i);
-            uint64_t w = data.get_element(j);
-            data.set_element(j, w ^ v);
+            size_t src = (i + n - 7 % n) % n;
+            if (src == i) continue;
+            data.set_element(i, data.get_element(i) ^ std::rotl(data.get_element(src), 3));
         }
     }
-    
+
+    void unapply_spiral(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        for (size_t i = n; i-- > 0;) {
+            size_t src = (i + n - 7 % n) % n;
+            if (src == i) continue;
+            data.set_element(i, data.get_element(i) ^ std::rotl(data.get_element(src), 3));
+        }
+    }
+
     void apply_interleave(container_t& data) {
         size_t n = data.element_count();
+        if (n < 3) return;
         std::vector<uint64_t> values(n);
         size_t half = n / 2;
+        for (size_t i = 0; i < n; ++i) values[i] = data.get_element(i);
         for (size_t i = 0; i < half; ++i) {
-            values[i * 2] = data.get_element(i);
-            values[i * 2 + 1] = data.get_element(half + i);
+            data.set_element(i * 2, values[i]);
+            data.set_element(i * 2 + 1, values[half + i]);
         }
-        for (size_t i = 0; i < n; ++i) data.set_element(i, values[i]);
     }
-    
+
+    void unapply_interleave(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 3) return;
+        std::vector<uint64_t> values(n);
+        size_t half = n / 2;
+        for (size_t i = 0; i < n; ++i) values[i] = data.get_element(i);
+        for (size_t i = 0; i < half; ++i) {
+            data.set_element(i, values[i * 2]);
+            data.set_element(half + i, values[i * 2 + 1]);
+        }
+    }
+
+    // Pairs are always applied to the higher index, so the lower value a step reads
+    // is untouched until its own step runs; undoing in reverse order restores it.
+    void entangle_pairs(size_t n, std::vector<std::pair<uint64_t, uint64_t>>& pairs) {
+        pairs.resize(n);
+        for (size_t k = 0; k < n; ++k) {
+            uint64_t a = m_prng.generate_range_u64(0, n - 1);
+            uint64_t b = m_prng.generate_range_u64(0, n - 1);
+            if (a > b) std::swap(a, b);
+            pairs[k] = {a, b};
+        }
+    }
+
     void apply_entangle(container_t& data) {
         size_t n = data.element_count();
-        for (size_t i = 0; i < n; ++i) {
-            size_t j = m_prng.generate_range_u64(0, n - 1);
-            uint64_t vi = data.get_element(i);
-            uint64_t vj = data.get_element(j);
-            data.set_element(i, vi ^ vj);
-            data.set_element(j, vj ^ vi);
+        if (n < 2) return;
+        std::vector<std::pair<uint64_t, uint64_t>> pairs;
+        entangle_pairs(n, pairs);
+        for (auto& [a, b] : pairs) {
+            if (a != b) data.set_element(b, data.get_element(b) ^ data.get_element(a));
         }
     }
-    
+
+    void unapply_entangle(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        std::vector<std::pair<uint64_t, uint64_t>> pairs;
+        entangle_pairs(n, pairs);
+        for (size_t k = n; k-- > 0;) {
+            auto [a, b] = pairs[k];
+            if (a != b) data.set_element(b, data.get_element(b) ^ data.get_element(a));
+        }
+    }
+
+    // Sequential state feedback; the same keystream is rebuilt on both sides.
     void apply_avalanche(container_t& data) {
         size_t n = data.element_count();
         uint64_t state = m_prng.generate_u64();
         for (size_t i = 0; i < n; ++i) {
-            uint64_t v = data.get_element(i);
-            state = (state * 0x9e3779b97f4a7c15ULL) + v;
-            data.set_element(i, v ^ state);
+            state = state * 0x9E3779B97F4A7C15ULL + 1;
+            data.set_element(i, data.get_element(i) ^ state);
         }
     }
-    
-    void apply_fractal_permute(container_t& data) {
-        std::function<void(size_t, size_t)> fractal = [&](size_t start, size_t len) {
-            if (len < 8) return;
-            size_t mid = len / 2;
-            auto perm = m_prng.generate_permutation(mid);
-            for (size_t i = 0; i < mid; ++i) {
-                size_t a = start + i;
-                size_t b = start + mid + perm[i];
-                if (b < start + len) {
-                    uint64_t va = data.get_element(a);
-                    uint64_t vb = data.get_element(b);
-                    data.set_element(a, vb);
-                    data.set_element(b, va);
-                }
-            }
-            fractal(start, mid);
-            fractal(start + mid, len - mid);
-        };
-        fractal(0, data.element_count());
+
+    void collect_fractal_swaps(std::vector<std::pair<uint64_t, uint64_t>>& out, size_t start, size_t len) {
+        if (len < 8) return;
+        size_t mid = len / 2;
+        if (mid < 1) return;
+        auto perm = m_prng.generate_permutation(mid);
+        for (size_t i = 0; i < mid; ++i) {
+            size_t a = start + i;
+            size_t b = start + mid + perm[i];
+            if (b < start + len) out.emplace_back(a, b);
+        }
+        collect_fractal_swaps(out, start, mid);
+        collect_fractal_swaps(out, start + mid, len - mid);
     }
-    
-    void apply_chaos_inject(container_t& data) {
-        double chaos = m_prng.generate_double();
+
+    void apply_fractal_permute(container_t& data) {
         size_t n = data.element_count();
-        size_t count = static_cast<size_t>(n * chaos);
+        if (n < 8) return;
+        std::vector<std::pair<uint64_t, uint64_t>> swaps;
+        collect_fractal_swaps(swaps, 0, n);
+        for (auto& [a, b] : swaps) {
+            if (a == b) continue;
+            uint64_t va = data.get_element(a);
+            uint64_t vb = data.get_element(b);
+            data.set_element(a, vb);
+            data.set_element(b, va);
+        }
+    }
+
+    void unapply_fractal_permute(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 8) return;
+        std::vector<std::pair<uint64_t, uint64_t>> swaps;
+        collect_fractal_swaps(swaps, 0, n);
+        for (size_t k = swaps.size(); k-- > 0;) {
+            auto [a, b] = swaps[k];
+            if (a == b) continue;
+            uint64_t va = data.get_element(a);
+            uint64_t vb = data.get_element(b);
+            data.set_element(a, vb);
+            data.set_element(b, va);
+        }
+    }
+
+    void apply_chaos_inject(container_t& data) {
+        size_t n = data.element_count();
+        if (n == 0) return;
+        double chaos = m_prng.generate_double();
+        size_t count = static_cast<size_t>(static_cast<double>(n) * chaos);
         for (size_t i = 0; i < count; ++i) {
             size_t pos = m_prng.generate_range_u64(0, n - 1);
-            uint64_t val = data.get_element(pos);
-            data.set_element(pos, val ^ m_prng.generate_u64());
+            data.set_element(pos, data.get_element(pos) ^ m_prng.generate_u64());
         }
     }
-    
-    // ============================================================================
-    // Buffer and State Operations (Reversible)
-    // ============================================================================
-    
+
     void apply_buffer_mixer(container_t& data) {
         size_t n = data.element_count();
         const size_t block = 256;
-        for (size_t off = 0; off < n; off += block * 2) {
+        for (size_t off = 0; off + block < n; off += block * 2) {
             for (size_t i = off; i < std::min(off + block, n); ++i) {
-                size_t j = off + block + (i % block);
-                if (j < n) {
-                    uint64_t a = data.get_element(i);
-                    uint64_t b = data.get_element(j);
-                    uint64_t r = (a ^ (b << (i % 13))) + m_prng.generate_u64();
-                    data.set_element(i, r);
-                }
+                size_t j = off + block + (i - off);
+                if (j >= n) continue;
+                uint64_t k = m_prng.generate_u64();
+                uint64_t a = data.get_element(i);
+                uint64_t b = data.get_element(j);
+                data.set_element(i, (a ^ std::rotl(b, static_cast<int>((i - off) % 13))) + k);
             }
         }
     }
-    
+
+    void unapply_buffer_mixer(container_t& data) {
+        size_t n = data.element_count();
+        const size_t block = 256;
+        for (size_t off = 0; off + block < n; off += block * 2) {
+            for (size_t i = off; i < std::min(off + block, n); ++i) {
+                size_t j = off + block + (i - off);
+                if (j >= n) continue;
+                uint64_t k = m_prng.generate_u64();
+                uint64_t b = data.get_element(j);
+                uint64_t r = data.get_element(i);
+                data.set_element(i, (r - k) ^ std::rotl(b, static_cast<int>((i - off) % 13)));
+            }
+        }
+    }
+
+    // Feistel pair: invertible without losing bits.
     void apply_dual_block_weave(container_t& data) {
         size_t n = data.element_count();
         const size_t block = 128;
-        for (size_t off = 0; off + block * 2 < n; off += block * 2) {
+        for (size_t off = 0; off + block * 2 <= n; off += block * 2) {
             for (size_t i = 0; i < block; ++i) {
+                uint64_t k = m_prng.generate_u64();
                 uint64_t a = data.get_element(off + i);
                 uint64_t b = data.get_element(off + block + i);
-                data.set_element(off + i, (a << 3) ^ (b >> 2));
-                data.set_element(off + block + i, (b << 5) ^ (a >> 1));
+                uint64_t a2 = a ^ (b + k);
+                uint64_t b2 = b ^ (a2 + k);
+                data.set_element(off + i, a2);
+                data.set_element(off + block + i, b2);
             }
         }
     }
-    
+
+    void unapply_dual_block_weave(container_t& data) {
+        size_t n = data.element_count();
+        const size_t block = 128;
+        for (size_t off = 0; off + block * 2 <= n; off += block * 2) {
+            for (size_t i = 0; i < block; ++i) {
+                uint64_t k = m_prng.generate_u64();
+                uint64_t a2 = data.get_element(off + i);
+                uint64_t b2 = data.get_element(off + block + i);
+                uint64_t b = b2 ^ (a2 + k);
+                uint64_t a = a2 ^ (b + k);
+                data.set_element(off + i, a);
+                data.set_element(off + block + i, b);
+            }
+        }
+    }
+
     void apply_instruction_cascade(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
         for (size_t i = 0; i < data.element_count(); ++i) {
             uint64_t instr = m_prng.generate_u64();
             uint64_t v = data.get_element(i);
             switch (instr % 4) {
                 case 0: v ^= (v << 7); break;
-                case 1: v += (v >> 3); break;
-                case 2: v = (v << 11) | (v >> 53); break;
-                case 3: v ^= m_prng.generate_u64(); break;
+                case 1: v += m_prng.generate_u64(); break;
+                case 2: v = rotl_within(v, 11, bits); break;
+                default: v ^= m_prng.generate_u64(); break;
             }
             data.set_element(i, v);
         }
     }
-    
-    void apply_state_machine_mix(container_t& data) {
-        size_t n = data.element_count();
-        uint64_t state = m_prng.generate_u64();
-        for (size_t i = 0; i < n; ++i) {
+
+    void unapply_instruction_cascade(container_t& data) {
+        size_t bits = bit_mode_to_size(data.global_mode());
+        for (size_t i = 0; i < data.element_count(); ++i) {
+            uint64_t instr = m_prng.generate_u64();
             uint64_t v = data.get_element(i);
-            state = (state * 6364136223846793005ULL + 1);
-            uint64_t op = state & 3;
-            if (op == 0) v ^= state;
-            else if (op == 1) v += (state << (i % 17));
-            else if (op == 2) v ^= (v >> (i % 11));
-            else v = (v << 9) | (v >> 55);
+            switch (instr % 4) {
+                case 0: v = undo_xorshift_left(v, 7); break;
+                case 1: v -= m_prng.generate_u64(); break;
+                case 2: v = rotr_within(v, 11, bits); break;
+                default: v ^= m_prng.generate_u64(); break;
+            }
             data.set_element(i, v);
         }
     }
-    
-    void apply_loop_fusion(container_t& data) {
+
+    void apply_state_machine_mix(container_t& data) {
         size_t n = data.element_count();
-        for (size_t i = 0; i < n; i += 2) {
-            uint64_t a = data.get_element(i);
-            uint64_t b = data.get_element((i + 1) % n);
-            uint64_t r1 = (a ^ b) + (a << 5);
-            uint64_t r2 = (b ^ a) + (b >> 3);
-            data.set_element(i, r1);
-            data.set_element((i + 1) % n, r2);
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t state = m_prng.generate_u64();
+        for (size_t i = 0; i < n; ++i) {
+            uint64_t v = data.get_element(i);
+            state = state * 6364136223846793005ULL + 1;
+            switch (state & 3) {
+                case 0: v ^= state; break;
+                case 1: v += (state << (i % 17)); break;
+                case 2: v ^= (v >> ((i % 11) + 1)); break;
+                default: v = rotl_within(v, 9, bits); break;
+            }
+            data.set_element(i, v);
         }
     }
-    
+
+    void unapply_state_machine_mix(container_t& data) {
+        size_t n = data.element_count();
+        size_t bits = bit_mode_to_size(data.global_mode());
+        uint64_t state = m_prng.generate_u64();
+        for (size_t i = 0; i < n; ++i) {
+            uint64_t v = data.get_element(i);
+            state = state * 6364136223846793005ULL + 1;
+            switch (state & 3) {
+                case 0: v ^= state; break;
+                case 1: v -= (state << (i % 17)); break;
+                case 2: v = undo_xorshift_right(v, static_cast<unsigned>((i % 11) + 1)); break;
+                default: v = rotr_within(v, 9, bits); break;
+            }
+            data.set_element(i, v);
+        }
+    }
+
+    void apply_loop_fusion(container_t& data) {
+        size_t n = data.element_count();
+        for (size_t i = 0; i + 1 < n; i += 2) {
+            uint64_t k = m_prng.generate_u64();
+            uint64_t a = data.get_element(i);
+            uint64_t b = data.get_element(i + 1);
+            uint64_t a2 = a ^ (b + k);
+            uint64_t b2 = b ^ (a2 + k);
+            data.set_element(i, a2);
+            data.set_element(i + 1, b2);
+        }
+    }
+
+    void unapply_loop_fusion(container_t& data) {
+        size_t n = data.element_count();
+        for (size_t i = 0; i + 1 < n; i += 2) {
+            uint64_t k = m_prng.generate_u64();
+            uint64_t a2 = data.get_element(i);
+            uint64_t b2 = data.get_element(i + 1);
+            uint64_t b = b2 ^ (a2 + k);
+            uint64_t a = a2 ^ (b + k);
+            data.set_element(i, a);
+            data.set_element(i + 1, b);
+        }
+    }
+
     void apply_block_resonance(container_t& data) {
         size_t n = data.element_count();
         const size_t block = 64;
         for (size_t off = 0; off < n; off += block) {
-            uint64_t resonance = 0;
-            for (size_t i = off; i < std::min(off + block, n); ++i) {
-                resonance ^= data.get_element(i);
-            }
-            for (size_t i = off; i < std::min(off + block, n); ++i) {
-                uint64_t v = data.get_element(i);
-                v ^= (resonance << ((i - off) % 13));
-                data.set_element(i, v);
+            uint64_t resonance = m_prng.generate_u64();
+            size_t end = std::min(off + block, n);
+            for (size_t i = off; i < end; ++i) {
+                data.set_element(i, data.get_element(i) ^ std::rotl(resonance, static_cast<int>((i - off) % 64)));
             }
         }
     }
-    
+
     // ============================================================================
-    // Parallel Operations (Reversible)
+    // Parallel Operations (deterministic, block-partitioned)
     // ============================================================================
-    
+
     void apply_parallel_scatter(container_t& data) {
         size_t n = data.element_count();
-        auto perm = m_prng.generate_permutation(n);
-        std::vector<uint64_t> values(n);
-        std::vector<std::future<void>> futures;
-        size_t chunk = n / m_settings.parallel_threads;
-        for (size_t t = 0; t < m_settings.parallel_threads; ++t) {
-            size_t start = t * chunk;
-            size_t end = (t == m_settings.parallel_threads - 1) ? n : start + chunk;
-            futures.push_back(std::async(std::launch::async, [&, start, end]() {
-                for (size_t i = start; i < end; ++i) {
-                    values[perm[i]] = data.get_element(i);
-                }
-            }));
+        if (n < 2) return;
+        const size_t block = 512;
+        for (size_t b = 0; b < n; b += block) {
+            size_t len = std::min(block, n - b);
+            if (len < 2) continue;
+            auto perm = m_prng.generate_permutation(len);
+            std::vector<uint64_t> vals(len);
+            for (size_t i = 0; i < len; ++i) vals[perm[i]] = data.get_element(b + i);
+            for (size_t i = 0; i < len; ++i) data.set_element(b + i, vals[i]);
         }
-        for (auto& f : futures) f.wait();
-        for (size_t i = 0; i < n; ++i) data.set_element(i, values[i]);
     }
-    
+
+    void unapply_parallel_scatter(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        const size_t block = 512;
+        for (size_t b = 0; b < n; b += block) {
+            size_t len = std::min(block, n - b);
+            if (len < 2) continue;
+            auto perm = m_prng.generate_permutation(len);
+            std::vector<uint64_t> vals(len);
+            for (size_t i = 0; i < len; ++i) vals[i] = data.get_element(b + perm[i]);
+            for (size_t i = 0; i < len; ++i) data.set_element(b + i, vals[i]);
+        }
+    }
+
     void apply_parallel_shuffle(container_t& data) {
         size_t n = data.element_count();
-        std::vector<std::future<void>> futures;
-        for (size_t t = 0; t < m_settings.parallel_threads; ++t) {
-            futures.push_back(std::async(std::launch::async, [&, t]() {
-                for (size_t i = 0; i < n * 2 / m_settings.parallel_threads; ++i) {
-                    size_t a = m_prng.generate_range_u64(0, n - 1);
-                    size_t b = m_prng.generate_range_u64(0, n - 1);
-                    if (a != b) {
-                        uint64_t va = data.get_element(a);
-                        uint64_t vb = data.get_element(b);
-                        data.set_element(a, vb);
-                        data.set_element(b, va);
-                    }
-                }
-            }));
-        }
-        for (auto& f : futures) f.wait();
+        if (n < 2) return;
+        perm_apply(data, fisher_yates(n));
     }
-    
+
+    void unapply_parallel_shuffle(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        perm_unapply(data, fisher_yates(n));
+    }
+
     void apply_parallel_diffuse(container_t& data) {
         size_t n = data.element_count();
-        std::vector<std::future<void>> futures;
-        for (size_t t = 0; t < m_settings.parallel_threads; ++t) {
-            futures.push_back(std::async(std::launch::async, [&, t]() {
-                size_t start = (t * n) / m_settings.parallel_threads;
-                size_t end = ((t + 1) * n) / m_settings.parallel_threads;
-                for (size_t i = start; i < end; ++i) {
-                    uint64_t v = data.get_element(i);
-                    size_t j = (i * 13 + 7) % n;
-                    uint64_t curr = data.get_element(j);
-                    data.set_element(j, curr ^ (v << (i % 17)));
-                }
-            }));
+        if (n < 2) return;
+        size_t threads = std::max<size_t>(1, m_settings.parallel_threads);
+        size_t block = (n + threads - 1) / threads;
+        for (size_t b = 0; b < n; b += block) {
+            size_t end = std::min(b + block, n);
+            for (size_t i = end; i-- > b + 1;) {
+                unsigned k = static_cast<unsigned>((i % 17) + 1);
+                data.set_element(i, data.get_element(i) ^ std::rotl(data.get_element(i - 1), k));
+            }
         }
-        for (auto& f : futures) f.wait();
     }
-    
+
+    void unapply_parallel_diffuse(container_t& data) {
+        size_t n = data.element_count();
+        if (n < 2) return;
+        size_t threads = std::max<size_t>(1, m_settings.parallel_threads);
+        size_t block = (n + threads - 1) / threads;
+        for (size_t b = 0; b < n; b += block) {
+            size_t end = std::min(b + block, n);
+            for (size_t i = b + 1; i < end; ++i) {
+                unsigned k = static_cast<unsigned>((i % 17) + 1);
+                data.set_element(i, data.get_element(i) ^ std::rotl(data.get_element(i - 1), k));
+            }
+        }
+    }
+
     // ============================================================================
-    // Noise Operations (Reversible - noise is applied during encryption only)
+    // Noise Operations (bit flips driven purely by the keystream -> self-inverse)
     // ============================================================================
-    
+
+    void flip_bit(container_t& data, size_t elem, size_t bit) {
+        data.set_element(elem, data.get_element(elem) ^ (1ULL << bit));
+    }
+
     void apply_noise_white(container_t& data) {
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
         size_t total_bits = n * bits_per_elem;
-        size_t noise_bits = static_cast<size_t>(total_bits * m_settings.noise_level);
+        size_t noise_bits = static_cast<size_t>(static_cast<double>(total_bits) * m_settings.noise_level);
         for (size_t i = 0; i < noise_bits; ++i) {
             size_t elem = m_prng.generate_range_u64(0, n - 1);
             size_t bit = m_prng.generate_range_u64(0, bits_per_elem - 1);
-            uint64_t val = data.get_element(elem);
-            val ^= (1ULL << bit);
-            data.set_element(elem, val);
+            flip_bit(data, elem, bit);
         }
     }
-    
+
     void apply_noise_pink(container_t& data) {
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
-        std::vector<double> state(8, 0.0);
+        std::vector<double> state(6, 0.0);
         for (size_t i = 0; i < n * bits_per_elem; ++i) {
             double white = m_prng.generate_double() * 2.0 - 1.0;
             state[0] = 0.99886 * state[0] + white * 0.0555179;
@@ -2621,169 +3505,130 @@ private:
             state[4] = 0.55000 * state[4] + white * 0.5329522;
             state[5] = -0.7616 * state[5] - white * 0.0168980;
             double pink = (state[0] + state[1] + state[2] + state[3] + state[4] + state[5] + white * 0.5362) * 0.11;
-            if (pink > 0.5) {
+            if (pink > 0.0) {
                 size_t elem = i / bits_per_elem;
-                size_t bit = i % bits_per_elem;
-                if (elem < n) {
-                    uint64_t val = data.get_element(elem);
-                    val ^= (1ULL << bit);
-                    data.set_element(elem, val);
-                }
+                if (elem < n) flip_bit(data, elem, i % bits_per_elem);
             }
         }
     }
-    
+
     void apply_noise_brown(container_t& data) {
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
         double brown = 0.0;
         for (size_t i = 0; i < n * bits_per_elem; ++i) {
             double white = m_prng.generate_double() * 2.0 - 1.0;
             brown = (brown + white) * 0.5;
-            double scaled = (brown + 1.0) / 2.0;
-            if (scaled > 0.5) {
+            if (brown > 0.0) {
                 size_t elem = i / bits_per_elem;
-                size_t bit = i % bits_per_elem;
-                if (elem < n) {
-                    uint64_t val = data.get_element(elem);
-                    val ^= (1ULL << bit);
-                    data.set_element(elem, val);
-                }
+                if (elem < n) flip_bit(data, elem, i % bits_per_elem);
             }
         }
     }
-    
+
     void apply_noise_gaussian(container_t& data) {
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
-        size_t noise_bits = static_cast<size_t>(n * bits_per_elem * m_settings.noise_level);
+        size_t noise_bits = static_cast<size_t>(
+            static_cast<double>(n * bits_per_elem) * m_settings.noise_level);
         for (size_t i = 0; i < noise_bits; ++i) {
-            double gaussian = m_prng.generate_gaussian(0.0, 1.0);
-            if (std::abs(gaussian) > 1.0) {
+            double g = m_prng.generate_gaussian(0.0, 1.0);
+            if (std::abs(g) > 1.0) {
                 size_t elem = m_prng.generate_range_u64(0, n - 1);
                 size_t bit = m_prng.generate_range_u64(0, bits_per_elem - 1);
-                uint64_t val = data.get_element(elem);
-                val ^= (1ULL << bit);
-                data.set_element(elem, val);
+                flip_bit(data, elem, bit);
             }
         }
     }
-    
+
     void apply_noise_impulse(container_t& data) {
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
-        double impulse_probability = 0.01;
         for (size_t i = 0; i < n * bits_per_elem; ++i) {
-            if (m_prng.generate_double() < impulse_probability) {
+            if (m_prng.generate_double() < 0.01) {
                 size_t elem = i / bits_per_elem;
-                size_t bit = i % bits_per_elem;
-                if (elem < n) {
-                    uint64_t val = data.get_element(elem);
-                    val ^= (1ULL << bit);
-                    data.set_element(elem, val);
-                }
+                if (elem < n) flip_bit(data, elem, i % bits_per_elem);
             }
         }
     }
-    
+
     void apply_noise_quantum(container_t& data) {
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
         for (size_t i = 0; i < n * bits_per_elem; ++i) {
-            double r = m_prng.generate_double();
-            if (r < 0.25) {
+            if (m_prng.generate_double() < 0.25) {
                 size_t elem = i / bits_per_elem;
-                size_t bit = i % bits_per_elem;
-                if (elem < n) {
-                    uint64_t val = data.get_element(elem);
-                    val ^= (1ULL << bit);
-                    data.set_element(elem, val);
-                }
+                if (elem < n) flip_bit(data, elem, i % bits_per_elem);
             }
         }
     }
-    
+
+    // Level comes from the keystream, not from data entropy, so it reproduces.
     void apply_noise_adaptive(container_t& data) {
-        double entropy = 0.0;
-        std::array<size_t, 256> freq{};
-        auto elements = data.to_elements();
-        for (auto e : elements) freq[e & 0xFF]++;
-        for (auto f : freq) {
-            if (f > 0) {
-                double p = static_cast<double>(f) / elements.size();
-                entropy -= p * std::log2(p);
-            }
-        }
-        entropy = entropy / 8.0;
-        double adaptive_level = m_settings.noise_level * (1.0 - entropy);
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
-        size_t noise_bits = static_cast<size_t>(n * bits_per_elem * adaptive_level);
+        double level = m_settings.noise_level * (0.5 + 0.5 * m_prng.generate_double());
+        size_t noise_bits = static_cast<size_t>(static_cast<double>(n * bits_per_elem) * level);
         for (size_t i = 0; i < noise_bits; ++i) {
             size_t elem = m_prng.generate_range_u64(0, n - 1);
             size_t bit = m_prng.generate_range_u64(0, bits_per_elem - 1);
-            uint64_t val = data.get_element(elem);
-            val ^= (1ULL << bit);
-            data.set_element(elem, val);
+            flip_bit(data, elem, bit);
         }
     }
-    
+
     void apply_noise_structured(container_t& data) {
-        std::vector<double> weights = {0.3, 0.2, 0.15, 0.1, 0.08, 0.06, 0.05, 0.04, 0.02};
+        static const double weights[] = {0.3, 0.2, 0.15, 0.1, 0.08, 0.06, 0.05, 0.04, 0.02};
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
         size_t total_bits = n * bits_per_elem;
-        for (size_t f = 0; f < weights.size(); ++f) {
+        for (size_t f = 0; f < 9; ++f) {
             if (m_prng.generate_double() < weights[f]) {
-                size_t period = 1 << f;
+                size_t period = size_t(1) << f;
                 for (size_t pos = f; pos < total_bits; pos += period) {
                     if (m_prng.generate_double() < 0.3) {
                         size_t elem = pos / bits_per_elem;
-                        size_t bit = pos % bits_per_elem;
-                        if (elem < n) {
-                            uint64_t val = data.get_element(elem);
-                            val ^= (1ULL << bit);
-                            data.set_element(elem, val);
-                        }
+                        if (elem < n) flip_bit(data, elem, pos % bits_per_elem);
                     }
                 }
             }
         }
     }
-    
+
     void apply_noise_chaotic(container_t& data) {
-        double x = m_prng.generate_double();
-        double r = 3.9;
         size_t n = data.element_count();
+        if (n == 0) return;
         size_t bits_per_elem = bit_mode_to_size(data.global_mode());
+        double x = m_prng.generate_double();
         for (size_t i = 0; i < n * bits_per_elem; ++i) {
-            x = r * x * (1.0 - x);
+            x = 3.9 * x * (1.0 - x);
             if (x > 0.5) {
                 size_t elem = i / bits_per_elem;
-                size_t bit = i % bits_per_elem;
-                if (elem < n) {
-                    uint64_t val = data.get_element(elem);
-                    val ^= (1ULL << bit);
-                    data.set_element(elem, val);
-                }
+                if (elem < n) flip_bit(data, elem, i % bits_per_elem);
             }
         }
     }
-    
+
     // ============================================================================
     // Shape Transform Application
     // ============================================================================
-    
-    void apply_transform(ShapeTransform* transform, container_t& data) {
-        ShapeContext ctx(m_prng, m_settings.shape_distribution, 
+
+    void apply_transform(ShapeTransform* transform, container_t& data, bool inverse) {
+        ShapeContext ctx(m_prng, m_settings.shape_distribution,
                          data.element_count(), m_settings.bit_mode);
-        transform->transform(data, ctx);
+        if (inverse) transform->inverse_transform(data, ctx);
+        else transform->transform(data, ctx);
     }
-    
+
     // ============================================================================
-    // Template Dispatch for Forward Operations
+    // Dispatch: forward operations and their inverses
     // ============================================================================
-    
+
     template<typename T>
     void apply_operation(container_t& data) {
         if constexpr (std::is_same_v<T, Scatter>) apply_scatter(data);
@@ -2850,131 +3695,118 @@ private:
         else if constexpr (std::is_same_v<T, NoiseChaotic>) apply_noise_chaotic(data);
         else if constexpr (std::is_base_of_v<ShapeTransform, T>) {
             T transform(m_settings.shape_distribution);
-            apply_transform(&transform, data);
+            apply_transform(&transform, data, false);
         }
     }
-    
-    // ============================================================================
-    // Reverse Operations for Decryption
-    // ============================================================================
-    
+
     template<typename T>
     void apply_reverse_operation(container_t& data) {
-        if constexpr (std::is_same_v<T, Scatter>) apply_scatter(data);
-        else if constexpr (std::is_same_v<T, Shuffle>) apply_shuffle(data);
-        else if constexpr (std::is_same_v<T, Diffuse>) apply_diffuse(data);
+        if constexpr (std::is_same_v<T, Scatter>) unapply_scatter(data);
+        else if constexpr (std::is_same_v<T, Shuffle>) unapply_shuffle(data);
+        else if constexpr (std::is_same_v<T, Diffuse>) unapply_diffuse(data);
         else if constexpr (std::is_same_v<T, Mix>) apply_mix(data);
-        else if constexpr (std::is_same_v<T, Permute>) apply_permute(data);
-        else if constexpr (std::is_same_v<T, Rotate>) {
-            size_t shift = m_prng.generate_range_u64(1, data.element_count() - 1);
-            size_t inv_shift = (data.element_count() - shift) % data.element_count();
-            std::vector<uint64_t> values(data.element_count());
-            for (size_t i = 0; i < data.element_count(); ++i) {
-                values[(i + inv_shift) % data.element_count()] = data.get_element(i);
-            }
-            for (size_t i = 0; i < data.element_count(); ++i) data.set_element(i, values[i]);
-        }
+        else if constexpr (std::is_same_v<T, Permute>) unapply_permute(data);
+        else if constexpr (std::is_same_v<T, Rotate>) unapply_rotate(data);
         else if constexpr (std::is_same_v<T, Flip>) apply_flip(data);
         else if constexpr (std::is_same_v<T, Swap>) apply_swap(data);
         else if constexpr (std::is_same_v<T, BitwiseNot>) apply_bitwise_not(data);
         else if constexpr (std::is_same_v<T, BitwiseRotL>) apply_bitwise_rotr(data);
         else if constexpr (std::is_same_v<T, BitwiseRotR>) apply_bitwise_rotl(data);
         else if constexpr (std::is_same_v<T, BitwiseReverse>) apply_bitwise_reverse(data);
-        else if constexpr (std::is_same_v<T, BitwiseSwapNibbles>) apply_bitwise_swap_nibbles(data);
-        else if constexpr (std::is_same_v<T, BitwiseGrayCode>) { apply_bitwise_gray_code(data); }
+        else if constexpr (std::is_same_v<T, BitwiseSwapNibbles>) unapply_bitwise_swap_nibbles(data);
+        else if constexpr (std::is_same_v<T, BitwiseGrayCode>) unapply_bitwise_gray_code(data);
         else if constexpr (std::is_same_v<T, BitwiseXor>) apply_bitwise_xor(data);
-        else if constexpr (std::is_same_v<T, BitwiseAnd>) apply_bitwise_or(data);
-        else if constexpr (std::is_same_v<T, BitwiseOr>) apply_bitwise_and(data);
+        else if constexpr (std::is_same_v<T, BitwiseAnd>) unapply_bitwise_and(data);
+        else if constexpr (std::is_same_v<T, BitwiseOr>) apply_bitwise_or(data);
         else if constexpr (std::is_same_v<T, ArithmeticNegate>) apply_arithmetic_negate(data);
         else if constexpr (std::is_same_v<T, ArithmeticAdd>) apply_arithmetic_sub(data);
         else if constexpr (std::is_same_v<T, ArithmeticSub>) apply_arithmetic_add(data);
-        else if constexpr (std::is_same_v<T, ArithmeticMul>) apply_arithmetic_div(data);
-        else if constexpr (std::is_same_v<T, ArithmeticDiv>) apply_arithmetic_mul(data);
+        else if constexpr (std::is_same_v<T, ArithmeticMul>) unapply_arithmetic_mul(data);
+        else if constexpr (std::is_same_v<T, ArithmeticDiv>) unapply_arithmetic_div(data);
         else if constexpr (std::is_same_v<T, ByteSwap>) apply_byte_swap(data);
         else if constexpr (std::is_same_v<T, ByteReverse>) apply_byte_reverse(data);
-        else if constexpr (std::is_same_v<T, ByteRotate>) {
-            size_t bytes = bit_mode_to_size(data.global_mode()) / 8;
-            if (bytes >= 2) {
-                uint8_t rot = static_cast<uint8_t>(m_prng.generate_range_u64(1, bytes - 1));
-                uint8_t inv_rot = (bytes - rot) % bytes;
-                for (size_t i = 0; i < data.element_count(); ++i) {
-                    uint64_t val = data.get_element(i);
-                    uint64_t rotated = 0;
-                    for (size_t b = 0; b < bytes; ++b) {
-                        size_t src = (b + inv_rot) % bytes;
-                        uint8_t byte_val = (val >> (src * 8)) & 0xFF;
-                        rotated |= static_cast<uint64_t>(byte_val) << (b * 8);
-                    }
-                    data.set_element(i, rotated);
-                }
-            }
-        }
+        else if constexpr (std::is_same_v<T, ByteRotate>) unapply_byte_rotate(data);
         else if constexpr (std::is_same_v<T, WordSwap>) apply_word_swap(data);
-        else if constexpr (std::is_same_v<T, WordMix>) apply_word_mix(data);
-        else if constexpr (std::is_same_v<T, TransformXorShift>) apply_transform_xorshift(data);
-        else if constexpr (std::is_same_v<T, TransformChaCha>) apply_transform_chacha(data);
-        else if constexpr (std::is_same_v<T, TransformAES>) apply_transform_aes(data);
-        else if constexpr (std::is_same_v<T, PushMode>) apply_pop_mode(data);
-        else if constexpr (std::is_same_v<T, PopMode>) apply_push_mode(data);
+        else if constexpr (std::is_same_v<T, WordMix>) unapply_word_mix(data);
+        else if constexpr (std::is_same_v<T, TransformXorShift>) unapply_transform_xorshift(data);
+        else if constexpr (std::is_same_v<T, TransformChaCha>) unapply_transform_chacha(data);
+        else if constexpr (std::is_same_v<T, TransformAES>) unapply_transform_aes(data);
+        else if constexpr (std::is_same_v<T, PushMode>) unapply_push_mode(data);
+        else if constexpr (std::is_same_v<T, PopMode>) unapply_pop_mode(data);
         else if constexpr (std::is_same_v<T, SwitchMode>) apply_switch_mode(data);
-        else if constexpr (std::is_same_v<T, ModeCycle>) {
-            if (m_mode_stack.empty()) return;
-            size_t s = m_prng.generate_range_u64(1, m_mode_stack.size());
-            std::rotate(m_mode_stack.rbegin(), m_mode_stack.rbegin() + s, m_mode_stack.rend());
-        }
+        else if constexpr (std::is_same_v<T, ModeCycle>) unapply_mode_cycle(data);
         else if constexpr (std::is_same_v<T, ModeFeedback>) apply_mode_feedback(data);
-        else if constexpr (std::is_same_v<T, ChunkPermute>) apply_chunk_permute(data);
-        else if constexpr (std::is_same_v<T, ChunkCascade>) apply_chunk_cascade(data);
-        else if constexpr (std::is_same_v<T, Cascade>) {
-            size_t n = data.element_count();
-            for (size_t i = n - 1; i > 0; --i) {
-                uint64_t v = data.get_element(i - 1);
-                uint64_t w = data.get_element(i);
-                data.set_element(i, w ^ v);
-            }
-        }
-        else if constexpr (std::is_same_v<T, Spiral>) apply_spiral(data);
-        else if constexpr (std::is_same_v<T, Interleave>) {
-            size_t n = data.element_count();
-            std::vector<uint64_t> values(n);
-            size_t half = n / 2;
-            for (size_t i = 0; i < half; ++i) {
-                values[i] = data.get_element(i * 2);
-                values[half + i] = data.get_element(i * 2 + 1);
-            }
-            for (size_t i = 0; i < n; ++i) data.set_element(i, values[i]);
-        }
-        else if constexpr (std::is_same_v<T, Entangle>) apply_entangle(data);
+        else if constexpr (std::is_same_v<T, ChunkPermute>) unapply_chunk_permute(data);
+        else if constexpr (std::is_same_v<T, ChunkCascade>) unapply_chunk_cascade(data);
+        else if constexpr (std::is_same_v<T, Cascade>) unapply_cascade(data);
+        else if constexpr (std::is_same_v<T, Spiral>) unapply_spiral(data);
+        else if constexpr (std::is_same_v<T, Interleave>) unapply_interleave(data);
+        else if constexpr (std::is_same_v<T, Entangle>) unapply_entangle(data);
         else if constexpr (std::is_same_v<T, Avalanche>) apply_avalanche(data);
-        else if constexpr (std::is_same_v<T, FractalPermute>) apply_fractal_permute(data);
+        else if constexpr (std::is_same_v<T, FractalPermute>) unapply_fractal_permute(data);
         else if constexpr (std::is_same_v<T, ChaosInject>) apply_chaos_inject(data);
-        else if constexpr (std::is_same_v<T, BufferMixer>) apply_buffer_mixer(data);
-        else if constexpr (std::is_same_v<T, DualBlockWeave>) apply_dual_block_weave(data);
-        else if constexpr (std::is_same_v<T, InstructionCascade>) apply_instruction_cascade(data);
-        else if constexpr (std::is_same_v<T, StateMachineMix>) apply_state_machine_mix(data);
-        else if constexpr (std::is_same_v<T, LoopFusion>) apply_loop_fusion(data);
+        else if constexpr (std::is_same_v<T, BufferMixer>) unapply_buffer_mixer(data);
+        else if constexpr (std::is_same_v<T, DualBlockWeave>) unapply_dual_block_weave(data);
+        else if constexpr (std::is_same_v<T, InstructionCascade>) unapply_instruction_cascade(data);
+        else if constexpr (std::is_same_v<T, StateMachineMix>) unapply_state_machine_mix(data);
+        else if constexpr (std::is_same_v<T, LoopFusion>) unapply_loop_fusion(data);
         else if constexpr (std::is_same_v<T, BlockResonance>) apply_block_resonance(data);
-        else if constexpr (std::is_same_v<T, ParallelScatter>) apply_parallel_scatter(data);
-        else if constexpr (std::is_same_v<T, ParallelShuffle>) apply_parallel_shuffle(data);
-        else if constexpr (std::is_same_v<T, ParallelDiffuse>) apply_parallel_diffuse(data);
-        else if constexpr (std::is_same_v<T, NoiseWhite>) {}
-        else if constexpr (std::is_same_v<T, NoisePink>) {}
-        else if constexpr (std::is_same_v<T, NoiseBrown>) {}
-        else if constexpr (std::is_same_v<T, NoiseGaussian>) {}
-        else if constexpr (std::is_same_v<T, NoiseImpulse>) {}
-        else if constexpr (std::is_same_v<T, NoiseQuantum>) {}
-        else if constexpr (std::is_same_v<T, NoiseAdaptive>) {}
-        else if constexpr (std::is_same_v<T, NoiseStructured>) {}
-        else if constexpr (std::is_same_v<T, NoiseChaotic>) {}
+        else if constexpr (std::is_same_v<T, ParallelScatter>) unapply_parallel_scatter(data);
+        else if constexpr (std::is_same_v<T, ParallelShuffle>) unapply_parallel_shuffle(data);
+        else if constexpr (std::is_same_v<T, ParallelDiffuse>) unapply_parallel_diffuse(data);
+        else if constexpr (std::is_same_v<T, NoiseWhite>) apply_noise_white(data);
+        else if constexpr (std::is_same_v<T, NoisePink>) apply_noise_pink(data);
+        else if constexpr (std::is_same_v<T, NoiseBrown>) apply_noise_brown(data);
+        else if constexpr (std::is_same_v<T, NoiseGaussian>) apply_noise_gaussian(data);
+        else if constexpr (std::is_same_v<T, NoiseImpulse>) apply_noise_impulse(data);
+        else if constexpr (std::is_same_v<T, NoiseQuantum>) apply_noise_quantum(data);
+        else if constexpr (std::is_same_v<T, NoiseAdaptive>) apply_noise_adaptive(data);
+        else if constexpr (std::is_same_v<T, NoiseStructured>) apply_noise_structured(data);
+        else if constexpr (std::is_same_v<T, NoiseChaotic>) apply_noise_chaotic(data);
         else if constexpr (std::is_base_of_v<ShapeTransform, T>) {
             T transform(m_settings.shape_distribution);
-            apply_transform(&transform, data);
-        }
-        else {
-            apply_operation<T>(data);
+            apply_transform(&transform, data, true);
         }
     }
-    
+
+    // ============================================================================
+    // Per-operation keystream control
+    // ============================================================================
+
+    static uint64_t op_token(size_t index) {
+        return 0x9E3779B97F4A7C15ULL * (static_cast<uint64_t>(index) + 1);
+    }
+
+    template<typename T, size_t Index>
+    void run_forward(container_t& data) {
+        m_prng.reseed(op_token(Index));
+        data.begin_bulk();
+        apply_operation<T>(data);
+        data.end_bulk();
+    }
+
+    template<typename T, size_t Index>
+    void run_inverse(container_t& data) {
+        m_prng.reseed(op_token(Index));
+        data.begin_bulk();
+        apply_reverse_operation<T>(data);
+        data.end_bulk();
+    }
+
+    template<size_t... Is>
+    void encrypt_ops(container_t& target, std::index_sequence<Is...>) {
+        (run_forward<Operations, Is>(target), ...);
+    }
+
+    template<size_t... Is>
+    void decrypt_ops(container_t& target, std::index_sequence<Is...>) {
+        // Inverses run last-to-first, and each one must reseed with the token of the
+        // operation it is undoing - not with the position it occupies in this pass.
+        ( run_inverse<
+              std::tuple_element_t<sizeof...(Is) - 1 - Is, std::tuple<Operations...>>,
+              sizeof...(Is) - 1 - Is>(target), ... );
+    }
+
 public:
     GeneticCipher() : m_data(m_settings.container_chunk_size, m_settings.bit_mode), m_current_encrypted_offset(0) {
         m_mode_stack.push_back(m_settings.bit_mode);
@@ -3047,11 +3879,15 @@ public:
         if (file.is_open()) {
             uint64_t hash = 0x9e3779b97f4a7c15ULL;
             char buffer[4096];
-            while (file.read(buffer, sizeof(buffer))) {
-                for (size_t i = 0; i < file.gcount(); ++i) {
+            // read() stops at the last full block, so a trailing partial block has
+            // to be folded in as well or the hash misses the file tail.
+            while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
+                std::streamsize got = file.gcount();
+                for (std::streamsize i = 0; i < got; ++i) {
                     hash = (hash ^ static_cast<uint8_t>(buffer[i])) * 0x9e3779b97f4a7c15ULL;
                     hash = std::rotl(hash, 13);
                 }
+                if (got < static_cast<std::streamsize>(sizeof(buffer))) break;
             }
             info.file_hash = hash;
             file.close();
@@ -3081,110 +3917,17 @@ public:
     // Streaming Encryption
     // ========================================================================
     
-    void encrypt_streaming(const std::string& output_filename, 
-                          std::function<void(float)> progress_callback = nullptr) {
-        if (m_pending_files.empty()) {
+    // Writes the same archive layout as save_encrypted(), so load_encrypted() and
+    // extract_all_files() can read it back. The previous implementation emitted a
+    // chunk-per-record stream with a trailing directory that nothing could decode.
+    void encrypt_streaming(const std::string& output_filename,
+                           std::function<void(float)> progress_callback = nullptr) {
+        if (m_pending_files.empty() && m_data.element_count() == 0) {
             throw std::runtime_error("No input files to encrypt");
         }
-        
-        m_current_output_file = output_filename;
-        m_current_encrypted_offset = 0;
-        
-        // Calculate total bytes for progress tracking
-        uint64_t total_bytes = 0;
-        for (const auto& [name, info] : m_pending_files) {
-            total_bytes += info.file_size;
-        }
-        uint64_t processed_bytes = 0;
-        
-        // Open output file
-        m_output_stream.open(output_filename, std::ios::binary | std::ios::out);
-        if (!m_output_stream.is_open()) {
-            throw std::runtime_error("Cannot create output file: " + output_filename);
-        }
-        
-        bool all_complete = false;
-        while (!all_complete) {
-            std::vector<FileChunk> chunks;
-            
-            switch (m_settings.file_access_mode) {
-                case FileAccessMode::SEQUENTIAL:
-                    chunks = get_next_chunks_sequential();
-                    break;
-                case FileAccessMode::INTERLEAVED:
-                    chunks = get_next_chunks_interleaved();
-                    break;
-                case FileAccessMode::RANDOM_CHUNK:
-                    chunks = get_next_chunks_random();
-                    break;
-                case FileAccessMode::PRIORITY_BASED:
-                    chunks = get_next_chunks_priority();
-                    break;
-            }
-            
-            if (chunks.empty()) {
-                all_complete = true;
-                break;
-            }
-            
-            for (auto& chunk : chunks) {
-                // Convert chunk data to container
-                container_t chunk_container(chunk.data.size(), BitMode::BYTE);
-                chunk_container.append_bytes(chunk.data.data(), chunk.data.size());
-                chunk_container.set_node_mode_by_tag("", m_settings.bit_mode);
-                
-                // Encrypt the chunk using the operation sequence
-                (apply_operation<Operations>(chunk_container), ...);
-                for (auto& transform : m_custom_transforms) {
-                    apply_transform(transform.get(), chunk_container);
-                }
-                apply_diffuse(chunk_container);
-                
-                // Write encrypted chunk with metadata
-                auto encrypted_bytes = chunk_container.to_bytes();
-                uint64_t chunk_offset = m_current_encrypted_offset;
-                
-                // Write chunk size
-                uint64_t chunk_size = encrypted_bytes.size();
-                m_output_stream.write(reinterpret_cast<const char*>(&chunk_size), sizeof(chunk_size));
-                
-                // Write chunk identifier
-                m_output_stream.write(reinterpret_cast<const char*>(&chunk.chunk_id), sizeof(chunk.chunk_id));
-                
-                // Write filename length and filename
-                uint32_t name_len = static_cast<uint32_t>(chunk.filename.length());
-                m_output_stream.write(reinterpret_cast<const char*>(&name_len), sizeof(name_len));
-                m_output_stream.write(chunk.filename.c_str(), name_len);
-                
-                // Write original offset
-                m_output_stream.write(reinterpret_cast<const char*>(&chunk.original_offset), sizeof(chunk.original_offset));
-                
-                // Write encrypted data
-                m_output_stream.write(reinterpret_cast<const char*>(encrypted_bytes.data()), encrypted_bytes.size());
-                
-                // Update directory
-                m_directory.update_chunk_map(chunk.filename, chunk_offset, chunk.original_offset);
-                
-                m_current_encrypted_offset += sizeof(chunk_size) + sizeof(chunk.chunk_id) + 
-                                               sizeof(name_len) + name_len + 
-                                               sizeof(chunk.original_offset) + encrypted_bytes.size();
-                
-                processed_bytes += chunk.data.size();
-                if (progress_callback) {
-                    progress_callback(static_cast<float>(processed_bytes) / total_bytes);
-                }
-            }
-        }
-        
-        m_output_stream.close();
-        
-        // Write final directory at the end of the file
-        auto dir_data = m_directory.serialize();
-        uint64_t dir_size = dir_data.size();
-        std::ofstream out_file(output_filename, std::ios::binary | std::ios::app);
-        out_file.write(reinterpret_cast<const char*>(&dir_size), sizeof(dir_size));
-        out_file.write(reinterpret_cast<const char*>(dir_data.data()), dir_data.size());
-        out_file.close();
+        if (progress_callback) progress_callback(0.0f);
+        save_encrypted(output_filename);
+        if (progress_callback) progress_callback(1.0f);
     }
     
     // ========================================================================
@@ -3290,51 +4033,70 @@ public:
     // ========================================================================
     
     container_t encrypt() {
-        if (m_data.element_count() == 0) {
+        encrypt_in_place();
+        return m_data.clone();
+    }
+
+    void encrypt_container(container_t& target) {
+        if (target.element_count() == 0) {
             throw std::runtime_error("No data to encrypt");
         }
-        
-        (apply_operation<Operations>(m_data), ...);
-        
-        for (auto& transform : m_custom_transforms) {
-            apply_transform(transform.get(), m_data);
+
+        // Pad *before* the operations run. Padding afterwards would change the
+        // element count between encryption and decryption, and every length-aware
+        // operation would then invert against the wrong geometry.
+        pad_to_minimum_size(target);
+
+        encrypt_ops(target, std::index_sequence_for<Operations...>{});
+
+        for (size_t k = 0; k < m_custom_transforms.size(); ++k) {
+            m_prng.reseed(op_token(0x10000 + k));
+            apply_transform(m_custom_transforms[k].get(), target, false);
         }
-        
-        // Ensure minimum size
-        size_t current_size = m_data.total_bytes();
-        if (current_size < m_settings.minimum_encrypted_size) {
-            size_t needed = m_settings.minimum_encrypted_size - current_size;
-            std::vector<uint8_t> padding(needed, 0);
-            m_data.append_bytes(padding.data(), needed);
-        }
-        
-        return std::move(m_data);
+    }
+
+    void encrypt_in_place() { encrypt_container(m_data); }
+
+    void pad_to_minimum_size(container_t& target) {
+        size_t current_size = target.total_bytes();
+        if (current_size >= m_settings.minimum_encrypted_size) return;
+
+        size_t needed_bytes = m_settings.minimum_encrypted_size - current_size;
+        size_t bytes_per_element = std::max<size_t>(1, bit_mode_to_size(target.global_mode()) / 8);
+        size_t needed_elements = (needed_bytes + bytes_per_element - 1) / bytes_per_element;
+        if (needed_elements == 0) return;
+
+        std::vector<uint64_t> zeros(needed_elements, 0);
+        target.append_elements(zeros.data(), zeros.size());
     }
     
     container_t encrypt(const container_t& data) {
-        m_data = data;
+        m_data.copy_from(data);
         return encrypt();
     }
     
     container_t decrypt() {
-        if (m_data.element_count() == 0) {
+        decrypt_in_place();
+        return m_data.clone();
+    }
+
+    void decrypt_container(container_t& target) {
+        if (target.element_count() == 0) {
             throw std::runtime_error("No data to decrypt");
         }
-        
-        for (auto it = m_custom_transforms.rbegin(); it != m_custom_transforms.rend(); ++it) {
-            apply_transform(it->get(), m_data);
+
+        for (size_t k = m_custom_transforms.size(); k-- > 0;) {
+            m_prng.reseed(op_token(0x10000 + k));
+            apply_transform(m_custom_transforms[k].get(), target, true);
         }
-        
-        std::tuple<Operations...> ops;
-        std::apply([&](auto&... op) {
-            (apply_reverse_operation<decltype(op)>(m_data), ...);
-        }, ops);
-        
-        return std::move(m_data);
+
+        decrypt_ops(target, std::index_sequence_for<Operations...>{});
     }
+
+    void decrypt_in_place() { decrypt_container(m_data); }
     
     container_t decrypt(const container_t& data) {
-        m_data = data;
+        m_data.copy_from(data);
         return decrypt();
     }
     
@@ -3342,17 +4104,63 @@ public:
     // File I/O with Directory Support
     // ========================================================================
     
+    // Concatenate the queued input files into m_data in a deterministic order and
+    // record each file's byte range in the directory, so extraction can slice the
+    // decrypted payload back apart.
+    void build_payload_from_pending_files() {
+        if (m_pending_files.empty()) return;
+
+        std::vector<std::string> order;
+        order.reserve(m_pending_files.size());
+        for (const auto& [key, info] : m_pending_files) order.push_back(key);
+
+        std::sort(order.begin(), order.end(), [this](const std::string& a, const std::string& b) {
+            const auto& ia = m_pending_files.at(a);
+            const auto& ib = m_pending_files.at(b);
+            if (m_settings.file_access_mode == FileAccessMode::PRIORITY_BASED &&
+                ia.file_size != ib.file_size) {
+                return ia.file_size > ib.file_size;
+            }
+            return ia.filename < ib.filename;
+        });
+
+        uint64_t offset = 0;
+        for (const auto& key : order) {
+            auto& info = m_pending_files.at(key);
+            std::ifstream in(info.original_path, std::ios::binary);
+            if (!in.is_open()) throw std::runtime_error("Cannot open input file: " + info.original_path);
+
+            std::vector<uint8_t> bytes(static_cast<size_t>(info.file_size));
+            if (!bytes.empty()) {
+                in.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+                bytes.resize(static_cast<size_t>(in.gcount()));
+            }
+            in.close();
+
+            m_data.append_bytes(bytes.data(), bytes.size());
+            m_directory.add_file(info.filename, bytes.size(), offset, bytes.size(),
+                                 info.file_hash, m_settings.bit_mode, info.access_mode);
+            offset += bytes.size();
+        }
+        m_pending_files.clear();
+    }
+
     void save_encrypted(const std::string& filename) {
-        auto encrypted = encrypt();
-        auto bytes = encrypted.to_bytes();
-        
+        build_payload_from_pending_files();
+        if (m_data.element_count() == 0) {
+            throw std::runtime_error("No data to encrypt");
+        }
+
+        encrypt_in_place();
+        auto bytes = m_data.to_bytes();
         auto dir_data = m_directory.serialize();
-        
+
         std::ofstream file(filename, std::ios::binary);
+        if (!file.is_open()) throw std::runtime_error("Cannot create output file: " + filename);
         uint64_t dir_size = dir_data.size();
         file.write(reinterpret_cast<const char*>(&dir_size), sizeof(dir_size));
-        file.write(reinterpret_cast<const char*>(dir_data.data()), dir_data.size());
-        file.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        file.write(reinterpret_cast<const char*>(dir_data.data()), static_cast<std::streamsize>(dir_data.size()));
+        file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
         file.close();
     }
     
@@ -3381,34 +4189,42 @@ public:
     
     void extract_all_files(const std::string& output_dir) {
         fs::create_directories(output_dir);
-        decrypt();
-        
+        container_t plain;
+        plain.copy_from(m_data);
+        decrypt_container(plain);        // never mutates m_data, so repeats are safe
+
         for (const auto& filename : m_directory.list_files()) {
             auto entry = m_directory.get_file(filename);
             std::vector<uint8_t> file_data;
-            for (size_t i = 0; i < entry.original_size; ++i) {
-                file_data.push_back(static_cast<uint8_t>(m_data.get_element(entry.encrypted_offset + i) & 0xFF));
+            file_data.reserve(static_cast<size_t>(entry.original_size));
+            for (uint64_t i = 0; i < entry.original_size; ++i) {
+                file_data.push_back(plain.get_byte(static_cast<size_t>(entry.encrypted_offset + i)));
             }
-            
-            std::string out_path = fs::path(output_dir) / filename;
+
+            std::string out_path = (fs::path(output_dir) / filename).string();
             std::ofstream out_file(out_path, std::ios::binary);
-            out_file.write(reinterpret_cast<const char*>(file_data.data()), file_data.size());
+            out_file.write(reinterpret_cast<const char*>(file_data.data()),
+                           static_cast<std::streamsize>(file_data.size()));
             out_file.close();
         }
     }
     
     void extract_file(const std::string& filename, const std::string& output_path) {
         auto entry = m_directory.get_file(filename);
-        decrypt();
-        
+        container_t plain;
+        plain.copy_from(m_data);
+        decrypt_container(plain);
+
         std::vector<uint8_t> file_data;
-        for (size_t i = 0; i < entry.original_size; ++i) {
-            file_data.push_back(static_cast<uint8_t>(m_data.get_element(entry.encrypted_offset + i) & 0xFF));
+        file_data.reserve(static_cast<size_t>(entry.original_size));
+        for (uint64_t i = 0; i < entry.original_size; ++i) {
+            file_data.push_back(plain.get_byte(static_cast<size_t>(entry.encrypted_offset + i)));
         }
-        
+
         std::string out_path = output_path.empty() ? filename : output_path;
         std::ofstream out_file(out_path, std::ios::binary);
-        out_file.write(reinterpret_cast<const char*>(file_data.data()), file_data.size());
+        out_file.write(reinterpret_cast<const char*>(file_data.data()),
+                       static_cast<std::streamsize>(file_data.size()));
         out_file.close();
     }
     
