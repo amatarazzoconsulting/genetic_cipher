@@ -308,19 +308,46 @@ public:
         m_total_size = 0;
         
         const uint8_t* ptr = data.data();
-        
+
+        if (data.size() < 3 * sizeof(uint64_t)) return false;
+
         uint64_t version = read_pod<uint64_t>(ptr);
         (void)version;   // format stamp, kept for forward compatibility checks
-        
+
         uint64_t file_count = read_pod<uint64_t>(ptr);
-        
+
         uint64_t expected_hash = read_pod<uint64_t>(ptr);
+
+        // A directory entry cannot be smaller than a few dozen bytes, so a count
+        // larger than that is a corrupt header rather than a real archive.
+        if (file_count > data.size() / 8) {
+            m_files.clear();
+            m_total_size = 0;
+            return false;
+        }
         
         for (uint64_t i = 0; i < file_count; ++i) {
-            size_t max_size = data.size() - (ptr - data.data());
-            std::vector<uint8_t> entry_data(ptr, ptr + max_size);
-            FileEntry entry = FileEntry::deserialize(entry_data);
+            size_t remaining = data.size() - static_cast<size_t>(ptr - data.data());
+            if (remaining == 0) {
+                m_files.clear();
+                m_total_size = 0;
+                return false;
+            }
+            std::vector<uint8_t> entry_data(ptr, ptr + remaining);
+            FileEntry entry;
+            try {
+                entry = FileEntry::deserialize(entry_data);
+            } catch (const std::exception&) {
+                m_files.clear();
+                m_total_size = 0;
+                return false;
+            }
             size_t entry_size = entry.serialize().size();
+            if (entry_size > remaining) {
+                m_files.clear();
+                m_total_size = 0;
+                return false;
+            }
             m_files[entry.filename] = entry;
             m_total_size += entry.original_size;
             ptr += entry_size;
@@ -440,40 +467,64 @@ inline std::vector<uint8_t> FileEntry::serialize() const {
 inline FileEntry FileEntry::deserialize(const_byte_span data) {
     FileEntry entry;
     const uint8_t* ptr = data.data();
-    
+    const uint8_t* end = data.data() + data.size();
+
+    // Every length in this structure comes from the file, so check it against what
+    // is actually left before allocating anything with it.
+    auto need = [&](size_t n) {
+        if (static_cast<size_t>(end - ptr) < n) {
+            throw std::runtime_error("Corrupt archive: truncated directory entry");
+        }
+    };
+
+    need(sizeof(uint32_t));
     uint32_t name_len = read_pod<uint32_t>(ptr);
+    need(name_len);
     entry.filename = std::string(reinterpret_cast<const char*>(ptr), name_len);
     ptr += name_len;
-    
+
+    need(sizeof(uint32_t));
     uint32_t path_len = read_pod<uint32_t>(ptr);
+    need(path_len);
     entry.original_path = std::string(reinterpret_cast<const char*>(ptr), path_len);
     ptr += path_len;
     
+    need(sizeof(uint64_t));
     entry.original_size = read_pod<uint64_t>(ptr);
+    need(sizeof(uint64_t));
     entry.encrypted_offset = read_pod<uint64_t>(ptr);
+    need(sizeof(uint64_t));
     entry.encrypted_size = read_pod<uint64_t>(ptr);
+    need(sizeof(uint64_t));
     entry.hash = read_pod<uint64_t>(ptr);
     
+    need(2);
     entry.stored_bit_mode = static_cast<BitMode>(*ptr);
     ptr += 1;
     
     entry.access_mode = static_cast<FileAccessMode>(*ptr);
     ptr += 1;
     
+    need(sizeof(uint64_t));
     entry.chunk_count = read_pod<uint64_t>(ptr);
     
+    need(sizeof(uint32_t));
     uint32_t chunk_map_size = read_pod<uint32_t>(ptr);
     
+    need(static_cast<size_t>(chunk_map_size) * 2 * sizeof(uint64_t));
     for (uint32_t i = 0; i < chunk_map_size; ++i) {
         uint64_t enc_off = read_pod<uint64_t>(ptr);
         uint64_t orig_off = read_pod<uint64_t>(ptr);
         entry.chunk_map.emplace_back(enc_off, orig_off);
     }
     
+    need(sizeof(int64_t));
     int64_t time_val = read_pod<int64_t>(ptr);
     entry.timestamp = std::chrono::system_clock::time_point(std::chrono::system_clock::duration(time_val));
     
+    need(sizeof(uint32_t));
     uint32_t meta_len = read_pod<uint32_t>(ptr);
+    need(meta_len);
     entry.metadata.assign(ptr, ptr + meta_len);
     
     return entry;
@@ -1091,12 +1142,23 @@ public:
         if (!bytes || byte_count == 0) return;
         
         std::unique_lock lock(m_list_mutex);
-        node_t* node = new node_t(std::max(byte_count, m_bytes_per_element * 64), 
-                                   m_next_node_id++, BitMode::BYTE, tag);
-        node->element_count = byte_count;
+
+        // Honour the container's global bit mode. Storing a byte-mode node inside a
+        // nibble- or word-mode container made the operations read the node at the
+        // wrong width and corrupt it.
+        size_t bits = bit_mode_to_size(m_global_mode);
+        size_t elements = (byte_count * 8 + bits - 1) / bits;
+        size_t stored_bytes = (elements * bits + 7) / 8;
+
+        node_t* node = new node_t(std::max(stored_bytes, m_bytes_per_element * 64),
+                                   m_next_node_id++, m_global_mode, tag);
+        node->element_count = elements;
         std::memcpy(node->data, bytes, byte_count);
-        node->size_bytes = byte_count;
-        node->mode = BitMode::BYTE;
+        if (stored_bytes > byte_count) {
+            std::memset(node->data + byte_count, 0, stored_bytes - byte_count);
+        }
+        node->size_bytes = stored_bytes;
+        node->mode = m_global_mode;
         
         node_t* tail = m_tail.load();
         if (!tail) {
@@ -1109,8 +1171,8 @@ public:
         }
         
         add_node_to_maps(node);
-        m_total_elements.fetch_add(byte_count);
-        m_total_bytes.fetch_add(byte_count);
+        m_total_elements.fetch_add(elements);
+        m_total_bytes.fetch_add(stored_bytes);
         m_node_count.fetch_add(1);
         invalidate_position_cache();
     }
@@ -3808,6 +3870,10 @@ private:
     }
 
 public:
+    // Handy for diagnostics and for sizing a progress bar.
+    static constexpr size_t operation_count = sizeof...(Operations);
+    using operation_list = std::tuple<Operations...>;
+
     GeneticCipher() : m_data(m_settings.container_chunk_size, m_settings.bit_mode), m_current_encrypted_offset(0) {
         m_mode_stack.push_back(m_settings.bit_mode);
     }
@@ -3934,98 +4000,17 @@ public:
     // Streaming Decryption
     // ========================================================================
     
+    // Mirrors encrypt_streaming(): reads the same directory-first archive and
+    // writes every recorded file back out. The previous implementation parsed the
+    // abandoned chunk-record format, so it could not read anything this header
+    // produced.
     void decrypt_streaming(const std::string& input_filename,
-                          const std::string& output_directory,
-                          std::function<void(float)> progress_callback = nullptr) {
-        std::ifstream in_file(input_filename, std::ios::binary);
-        if (!in_file.is_open()) {
-            throw std::runtime_error("Cannot open input file: " + input_filename);
-        }
-        
-        // Read directory from end of file
-        in_file.seekg(-static_cast<std::streamoff>(sizeof(uint64_t)), std::ios::end);
-        uint64_t dir_size;
-        in_file.read(reinterpret_cast<char*>(&dir_size), sizeof(dir_size));
-        
-        in_file.seekg(-static_cast<std::streamoff>(sizeof(uint64_t) + dir_size), std::ios::end);
-        std::vector<uint8_t> dir_data(dir_size);
-        in_file.read(reinterpret_cast<char*>(dir_data.data()), dir_size);
-        m_directory.deserialize(dir_data);
-        
-        // Seek back to beginning of data
-        in_file.seekg(0, std::ios::beg);
-        
-        fs::create_directories(output_directory);
-        
-        // Prepare output file streams
-        std::unordered_map<std::string, std::ofstream> out_files;
-        for (const auto& filename : m_directory.list_files()) {
-            auto entry = m_directory.get_file(filename);
-            std::string out_path = fs::path(output_directory) / filename;
-            out_files[filename].open(out_path, std::ios::binary);
-        }
-        
-        uint64_t total_chunks = 0;
-        for (const auto& filename : m_directory.list_files()) {
-            auto entry = m_directory.get_file(filename);
-            total_chunks += entry.chunk_count;
-        }
-        uint64_t processed_chunks = 0;
-        
-        // Read and decrypt chunks
-        while (in_file.peek() != EOF && in_file.tellg() < static_cast<std::streamoff>(in_file.seekg(0, std::ios::end).tellg() - static_cast<std::streamoff>(sizeof(uint64_t) + dir_size))) {
-            // Read chunk metadata
-            uint64_t chunk_size;
-            in_file.read(reinterpret_cast<char*>(&chunk_size), sizeof(chunk_size));
-            if (in_file.eof()) break;
-            
-            uint64_t chunk_id;
-            in_file.read(reinterpret_cast<char*>(&chunk_id), sizeof(chunk_id));
-            
-            uint32_t name_len;
-            in_file.read(reinterpret_cast<char*>(&name_len), sizeof(name_len));
-            std::string filename(name_len, '\0');
-            in_file.read(&filename[0], name_len);
-            
-            uint64_t original_offset;
-            in_file.read(reinterpret_cast<char*>(&original_offset), sizeof(original_offset));
-            
-            // Read encrypted data
-            std::vector<uint8_t> encrypted_data(chunk_size);
-            in_file.read(reinterpret_cast<char*>(encrypted_data.data()), chunk_size);
-            
-            // Decrypt the chunk
-            container_t chunk_container(encrypted_data.size(), BitMode::BYTE);
-            chunk_container.append_bytes(encrypted_data.data(), encrypted_data.size());
-            
-            // Apply reverse operations
-            for (auto it = m_custom_transforms.rbegin(); it != m_custom_transforms.rend(); ++it) {
-                apply_transform(it->get(), chunk_container);
-            }
-            
-            std::tuple<Operations...> ops;
-            std::apply([&](auto&... op) {
-                (apply_reverse_operation<decltype(op)>(chunk_container), ...);
-            }, ops);
-            
-            // Write decrypted data to output file
-            auto decrypted_bytes = chunk_container.to_bytes();
-            auto& out_file = out_files[filename];
-            out_file.seekp(original_offset);
-            out_file.write(reinterpret_cast<const char*>(decrypted_bytes.data()), decrypted_bytes.size());
-            
-            processed_chunks++;
-            if (progress_callback) {
-                progress_callback(static_cast<float>(processed_chunks) / total_chunks);
-            }
-        }
-        
-        // Close all output files
-        for (auto& [name, file] : out_files) {
-            file.close();
-        }
-        
-        in_file.close();
+                           const std::string& output_directory,
+                           std::function<void(float)> progress_callback = nullptr) {
+        if (progress_callback) progress_callback(0.0f);
+        load_encrypted(input_filename);
+        extract_all_files(output_directory);
+        if (progress_callback) progress_callback(1.0f);
     }
     
     // ========================================================================
@@ -4168,14 +4153,26 @@ public:
         std::ifstream file(filename, std::ios::binary);
         if (!file.is_open()) throw std::runtime_error("Cannot open file: " + filename);
         
+        file.seekg(0, std::ios::end);
+        std::streamoff file_size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        if (file_size < static_cast<std::streamoff>(sizeof(uint64_t))) {
+            throw std::runtime_error("Not a genetic_cipher archive: " + filename);
+        }
+
         uint64_t dir_size;
         file.read(reinterpret_cast<char*>(&dir_size), sizeof(dir_size));
-        std::vector<uint8_t> dir_data(dir_size);
-        file.read(reinterpret_cast<char*>(dir_data.data()), dir_size);
+        // dir_size comes from the file: refuse anything that does not fit inside it
+        // instead of trying to allocate it.
+        if (dir_size > static_cast<uint64_t>(file_size) - sizeof(uint64_t)) {
+            throw std::runtime_error("Not a genetic_cipher archive: " + filename);
+        }
+        std::vector<uint8_t> dir_data(static_cast<size_t>(dir_size));
+        file.read(reinterpret_cast<char*>(dir_data.data()), static_cast<std::streamsize>(dir_size));
+        if (!file) throw std::runtime_error("Not a genetic_cipher archive: " + filename);
         m_directory.deserialize(dir_data);
-        
-        file.seekg(0, std::ios::end);
-        size_t total_size = file.tellg();
+
+        size_t total_size = static_cast<size_t>(file_size);
         size_t data_size = total_size - sizeof(dir_size) - dir_size;
         file.seekg(sizeof(dir_size) + dir_size, std::ios::beg);
         
