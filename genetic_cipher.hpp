@@ -1971,10 +1971,20 @@ public:
     void rotate_rings(container_t& data, ShapeContext& ctx, bool inverse) {
         std::vector<std::vector<size_t>> ring_list;
         rings(ctx, ring_list);
-        for (auto& indices : ring_list) {
+        // Rasterized neighboring circles can overlap. Save the forward shifts
+        // before reversing traversal so each inverse uses the same random choice.
+        std::vector<int64_t> shifts;
+        for (const auto& indices : ring_list) {
             size_t len = indices.size();
             int64_t shift = ctx.prng.generate_range_i64(1, static_cast<int64_t>(len) - 1);
             if (ctx.prng.generate_bool(0.5)) shift = -shift;
+            shifts.push_back(shift);
+        }
+        for (size_t step = 0; step < ring_list.size(); ++step) {
+            size_t ring = inverse ? ring_list.size() - 1 - step : step;
+            const auto& indices = ring_list[ring];
+            size_t len = indices.size();
+            int64_t shift = shifts[ring];
             if (inverse) shift = -shift;
             std::vector<uint64_t> values;
             values.reserve(len);
@@ -1994,6 +2004,104 @@ public:
 // ============================================================================
 // Operation Tag Structs - All Fully Reversible
 // ============================================================================
+// Regular polygons rasterized onto the existing square grid. Subdivision clips
+// the polygon into four spatial quadrants, producing smaller polygon regions.
+// Only positions move; values and the incomplete-grid tail are preserved.
+template<size_t Sides>
+class RegularPolygonTransform : public ShapeTransform {
+    static_assert(Sides >= 3 && Sides <= 64, "Polygon needs 3..64 sides");
+    struct Region {
+        std::vector<size_t> indices;
+        size_t x, y, width, height, depth;
+    };
+    struct Rotation { std::vector<size_t> indices; size_t shift; };
+
+    static void validate(const DistributionParams& p) {
+        if (!std::isfinite(p.coverage_percentage) || p.coverage_percentage < 0 || p.coverage_percentage > 100 ||
+            !std::isfinite(p.subdivision_percentage) || p.subdivision_percentage < 0 || p.subdivision_percentage > 100 ||
+            p.min_subdivision_size < 2 || p.max_subdivision_size < p.min_subdivision_size)
+            throw std::invalid_argument("Invalid polygon distribution parameters");
+    }
+
+    void apply(container_t& data, ShapeContext& ctx, bool inverse) {
+        validate(ctx.params);
+        const size_t side = static_cast<size_t>(std::sqrt(ctx.total_elements));
+        if (side < 2 || ctx.params.coverage_percentage == 0) return;
+        const double pi = std::acos(-1.0);
+        const double center = double(side - 1) / 2;
+        const double radius = double(side) / 2 * std::sqrt(ctx.params.coverage_percentage / 100);
+        std::array<std::pair<double, double>, Sides> vertices;
+        for (size_t i = 0; i < Sides; ++i) {
+            double angle = -pi / 2 + 2 * pi * double(i) / Sides;
+            vertices[i] = {center + radius * std::cos(angle), center + radius * std::sin(angle)};
+        }
+        Region root{{}, 0, 0, side, side, 0};
+        for (size_t y = 0; y < side; ++y) for (size_t x = 0; x < side; ++x) {
+            bool inside = true;
+            for (size_t i = 0; i < Sides; ++i) {
+                const auto [ax, ay] = vertices[i];
+                const auto [bx, by] = vertices[(i + 1) % Sides];
+                if ((bx-ax)*(double(y)-ay) - (by-ay)*(double(x)-ax) < -1e-9) { inside = false; break; }
+            }
+            if (inside) root.indices.push_back(y * side + x);
+        }
+        std::vector<Region> pending;
+        pending.push_back(std::move(root));
+        std::vector<Rotation> rotations;
+        // Explicit traversal stack avoids call-stack growth for large depth values.
+        // Regions shrink geometrically, so recursion_depth is always an upper bound.
+        while (!pending.empty()) {
+            Region r = std::move(pending.back()); pending.pop_back();
+            if (r.indices.size() < 2) continue;
+            for (size_t start = 0; start < r.indices.size();) {
+                size_t count = std::min(ctx.params.max_subdivision_size, r.indices.size() - start);
+                if (count > 1) {
+                    std::vector<size_t> group(r.indices.begin() + start, r.indices.begin() + start + count);
+                    rotations.push_back({std::move(group), ctx.prng.generate_range_u64(1, count - 1)});
+                }
+                start += count;
+            }
+            if (!ctx.params.recursive_subdivisions || r.depth >= ctx.params.recursion_depth ||
+                r.indices.size() <= ctx.params.min_subdivision_size || (r.width < 2 && r.height < 2)) continue;
+            const size_t left = r.width / 2, top = r.height / 2;
+            std::array<Region, 4> children{{
+                {{}, r.x, r.y, left, top, r.depth+1},
+                {{}, r.x+left, r.y, r.width-left, top, r.depth+1},
+                {{}, r.x, r.y+top, left, r.height-top, r.depth+1},
+                {{}, r.x+left, r.y+top, r.width-left, r.height-top, r.depth+1}}};
+            for (size_t idx : r.indices) {
+                size_t quadrant = (idx % side >= r.x+left ? 1 : 0) + (idx / side >= r.y+top ? 2 : 0);
+                children[quadrant].indices.push_back(idx);
+            }
+            // Percentage selects how many of the four child regions participate.
+            size_t selected = static_cast<size_t>(4 * ctx.params.subdivision_percentage / 100);
+            for (size_t i = selected; i-- > 0;) if (!children[i].indices.empty())
+                pending.push_back(std::move(children[i]));
+        }
+        auto rotate = [&](const Rotation& r) {
+            const size_t n = r.indices.size();
+            const size_t shift = inverse ? n-r.shift : r.shift;
+            std::vector<uint64_t> values;
+            values.reserve(n);
+            for (size_t idx : r.indices) values.push_back(data.get_element(idx));
+            for (size_t i = 0; i < n; ++i) data.set_element(r.indices[(i+shift)%n], values[i]);
+        };
+        if (inverse) { for (size_t i = rotations.size(); i-- > 0;) rotate(rotations[i]); }
+        else { for (const auto& r : rotations) rotate(r); }
+    }
+public:
+    explicit RegularPolygonTransform(const DistributionParams& params = DistributionParams()) : ShapeTransform(params) {}
+    void transform(container_t& data, ShapeContext& ctx) override { apply(data, ctx, false); }
+    void inverse_transform(container_t& data, ShapeContext& ctx) override { apply(data, ctx, true); }
+    std::string name() const override { return "Polygon" + std::to_string(Sides) + "Transform"; }
+};
+
+using TriangleTransform = RegularPolygonTransform<3>;
+using PentagonTransform = RegularPolygonTransform<5>;
+using HexagonTransform = RegularPolygonTransform<6>;
+using OctagonTransform = RegularPolygonTransform<8>;
+using PolygonTransform = HexagonTransform;
+
 struct Scatter {};
 struct Shuffle {};
 struct Diffuse {};
@@ -4047,8 +4155,8 @@ public:
         if (current_size >= m_settings.minimum_encrypted_size) return;
 
         size_t needed_bytes = m_settings.minimum_encrypted_size - current_size;
-        size_t bytes_per_element = std::max<size_t>(1, bit_mode_to_size(target.global_mode()) / 8);
-        size_t needed_elements = (needed_bytes + bytes_per_element - 1) / bytes_per_element;
+        size_t bits_per_element = bit_mode_to_size(target.global_mode());
+        size_t needed_elements = (needed_bytes * 8 + bits_per_element - 1) / bits_per_element;
         if (needed_elements == 0) return;
 
         std::vector<uint64_t> zeros(needed_elements, 0);

@@ -1,5 +1,22 @@
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:e7af96f41b97aef3f6f285c80b358ab6a5e8dfc036522719b5988c212e0d39db -->
+
 # Genetic Encryption 
+
+> **Experimental cryptography:** tests found deterministic ciphertext, unauthenticated payloads, and a known-plaintext break of the XOR-only pipeline. Claims of production readiness and strong password stretching below have not been established. See [the security assessment](SECURITY_ASSESSMENT.md) for reproducible tests, limitations, and comparison with AES-GCM and ChaCha20-Poly1305.
+
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:d426b147155ad86e9605fdd09ee3b9343e8f6a1bf6cc1b5b2ec291eb03fee852 -->
+
 Source and Examples
+
+See [polygon shapes and recursive subdivision](SHAPES.md) for the new shape options, settings, and nested push/pop behavior.
+
+<!-- /coderabbit-ai-generated:v1 -->
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 By Anthony Matarazzo (c) 2026
 
