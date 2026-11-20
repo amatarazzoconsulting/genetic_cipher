@@ -1176,6 +1176,42 @@ public:
         m_node_count.fetch_add(1);
         invalidate_position_cache();
     }
+
+    void append_packed_bytes(const uint8_t* bytes, size_t byte_count,
+                             size_t element_count, const std::string& tag = "") {
+        const size_t bits = bit_mode_to_size(m_global_mode);
+        if (bits == 0 || bits > 64)
+            throw std::invalid_argument("Packed element widths must be between 1 and 64 bits");
+        if (element_count > std::numeric_limits<size_t>::max() / bits)
+            throw std::length_error("Packed element count is too large");
+        const size_t required_bytes = bits_to_bytes(element_count * bits);
+        if (required_bytes != byte_count || (byte_count != 0 && !bytes))
+            throw std::invalid_argument("Packed byte count does not match the element count");
+        if (element_count == 0) return;
+
+        std::unique_lock lock(m_list_mutex);
+        node_t* node = new node_t(std::max(required_bytes, m_bytes_per_element * 64),
+                                  m_next_node_id++, m_global_mode, tag);
+        std::memcpy(node->data, bytes, required_bytes);
+        node->element_count = element_count;
+        node->size_bytes = required_bytes;
+        node->mode = m_global_mode;
+
+        node_t* tail = m_tail.load();
+        if (!tail) {
+            m_head = node;
+            m_tail = node;
+        } else {
+            tail->next = node;
+            node->prev = tail;
+            m_tail = node;
+        }
+        add_node_to_maps(node);
+        m_total_elements.fetch_add(element_count);
+        m_total_bytes.fetch_add(required_bytes);
+        m_node_count.fetch_add(1);
+        invalidate_position_cache();
+    }
     
     // ========================================================================
     // Tag Management
@@ -1872,7 +1908,79 @@ public:
         }
         return result;
     }
+
+    std::vector<size_t> plot_line(int x0, int y0, int x1, int y1) const {
+        std::vector<size_t> points;
+        const int dx = std::abs(x1 - x0);
+        const int sx = x0 < x1 ? 1 : -1;
+        const int dy = -std::abs(y1 - y0);
+        const int sy = y0 < y1 ? 1 : -1;
+        int error = dx + dy;
+        while (true) {
+            if (x0 >= 0 && y0 >= 0 &&
+                is_valid(static_cast<size_t>(x0), static_cast<size_t>(y0))) {
+                points.push_back(index(static_cast<size_t>(x0), static_cast<size_t>(y0)));
+            }
+            if (x0 == x1 && y0 == y1) break;
+            const int twice_error = 2 * error;
+            if (twice_error >= dy) {
+                error += dy;
+                x0 += sx;
+            }
+            if (twice_error <= dx) {
+                error += dx;
+                y0 += sy;
+            }
+        }
+        return points;
+    }
 };
+
+struct ShapePermutation {
+    std::vector<size_t> indices;
+    size_t shift = 0;
+    bool pairwise_swap = false;
+};
+
+inline void add_shape_rotation(std::vector<ShapePermutation>& operations,
+                               std::vector<size_t> indices,
+                               CryptographicPRNG& prng) {
+    if (indices.size() < 2) return;
+    const auto shift = static_cast<size_t>(
+        prng.generate_range_u64(1, indices.size() - 1));
+    operations.push_back({std::move(indices), shift});
+}
+
+inline void apply_shape_permutations(container_t& data,
+                                     const std::vector<ShapePermutation>& operations,
+                                     bool inverse) {
+    auto apply = [&](const ShapePermutation& operation) {
+        const size_t count = operation.indices.size();
+        if (operation.pairwise_swap) {
+            for (size_t i = 0; i + 1 < count; i += 2) {
+                const uint64_t first = data.get_element(operation.indices[i]);
+                const uint64_t second = data.get_element(operation.indices[i + 1]);
+                data.set_element(operation.indices[i], second);
+                data.set_element(operation.indices[i + 1], first);
+            }
+            return;
+        }
+        const size_t shift = inverse ? count - operation.shift : operation.shift;
+        std::vector<uint64_t> values;
+        values.reserve(count);
+        for (size_t index : operation.indices)
+            values.push_back(data.get_element(index));
+        for (size_t i = 0; i < count; ++i)
+            data.set_element(operation.indices[(i + shift) % count], values[i]);
+    };
+    if (inverse) {
+        for (size_t i = operations.size(); i-- > 0;)
+            apply(operations[i]);
+    } else {
+        for (const auto& operation : operations)
+            apply(operation);
+    }
+}
 
 // ============================================================================
 // Shape Transform Base Class
@@ -1903,101 +2011,189 @@ public:
 // Built-in Shape Transforms
 // ============================================================================
 class SquareTransform : public ShapeTransform {
+    struct Region {
+        size_t x, y, width, height, depth;
+    };
+
+    static void validate(const DistributionParams& params) {
+        if (!std::isfinite(params.coverage_percentage) ||
+            params.coverage_percentage < 0 || params.coverage_percentage > 100 ||
+            !std::isfinite(params.subdivision_percentage) ||
+            params.subdivision_percentage < 0 || params.subdivision_percentage > 100 ||
+            params.min_subdivision_size < 2 ||
+            params.max_subdivision_size < params.min_subdivision_size)
+            throw std::invalid_argument("Invalid square distribution parameters");
+    }
+
+    void collect_ops(ShapeContext& ctx, std::vector<ShapePermutation>& operations) {
+        validate(ctx.params);
+        Grid2D grid(ctx.total_elements);
+        const size_t side = grid.width();
+        if (side < 2 || ctx.params.coverage_percentage == 0) return;
+
+        auto include = [&] {
+            return ctx.prng.generate_double() * 100.0 < ctx.params.coverage_percentage;
+        };
+        for (size_t row = 0; row < side; ++row)
+            if (include()) add_shape_rotation(operations, grid.get_row(row), ctx.prng);
+        for (size_t column = 0; column < side; ++column)
+            if (include()) add_shape_rotation(operations, grid.get_column(column), ctx.prng);
+
+        std::vector<Region> pending{{0, 0, side, side, 0}};
+        while (!pending.empty()) {
+            const Region region = pending.back();
+            pending.pop_back();
+            const size_t area = region.width * region.height;
+            if (ctx.params.recursive_subdivisions &&
+                region.depth < ctx.params.recursion_depth && area > ctx.params.min_subdivision_size &&
+                region.width > 1 && region.height > 1) {
+                const size_t left = region.width / 2;
+                const size_t top = region.height / 2;
+                std::array<Region, 4> children{{
+                    {region.x, region.y, left, top, region.depth + 1},
+                    {region.x + left, region.y, region.width - left, top, region.depth + 1},
+                    {region.x, region.y + top, left, region.height - top, region.depth + 1},
+                    {region.x + left, region.y + top, region.width - left,
+                     region.height - top, region.depth + 1}}};
+                std::array<size_t, 4> order{0, 1, 2, 3};
+                for (size_t i = order.size(); i > 1; --i) {
+                    const size_t j = ctx.prng.generate_range_u64(0, i - 1);
+                    std::swap(order[i - 1], order[j]);
+                }
+                size_t selected = static_cast<size_t>(
+                    std::ceil(4.0 * ctx.params.subdivision_percentage / 100.0));
+                if (ctx.params.subdivision_percentage > 0)
+                    selected = std::max<size_t>(1, selected);
+                for (size_t i = 0; i < selected; ++i)
+                    pending.push_back(children[order[i]]);
+                continue;
+            }
+
+            std::vector<size_t> points;
+            points.reserve(area);
+            for (size_t y = region.y; y < region.y + region.height; ++y)
+                for (size_t x = region.x; x < region.x + region.width; ++x)
+                    points.push_back(grid.index(x, y));
+            for (size_t start = 0; start < points.size();) {
+                const size_t remaining = points.size() - start;
+                const size_t upper = std::min(ctx.params.max_subdivision_size, remaining);
+                const size_t lower = std::min(ctx.params.min_subdivision_size, upper);
+                const size_t count = lower == upper
+                    ? upper
+                    : static_cast<size_t>(ctx.prng.generate_range_u64(lower, upper));
+                std::vector<size_t> piece(points.begin() + start, points.begin() + start + count);
+                if (include()) add_shape_rotation(operations, std::move(piece), ctx.prng);
+                start += count;
+            }
+        }
+
+        const size_t line_count = std::max<size_t>(
+            1, static_cast<size_t>(side * ctx.params.subdivision_percentage / 100.0));
+        for (size_t i = 0; i < line_count; ++i) {
+            const int x0 = static_cast<int>(ctx.prng.generate_range_u64(0, side - 1));
+            const int y0 = static_cast<int>(ctx.prng.generate_range_u64(0, side - 1));
+            const int x1 = static_cast<int>(ctx.prng.generate_range_u64(0, side - 1));
+            const int y1 = static_cast<int>(ctx.prng.generate_range_u64(0, side - 1));
+            auto line = grid.plot_line(x0, y0, x1, y1);
+            if (line.size() > 1 && include())
+                add_shape_rotation(operations, std::move(line), ctx.prng);
+        }
+    }
+
+    void apply(container_t& data, ShapeContext& ctx, bool inverse) {
+        std::vector<ShapePermutation> operations;
+        collect_ops(ctx, operations);
+        apply_shape_permutations(data, operations, inverse);
+    }
+
 public:
     explicit SquareTransform(const DistributionParams& params = DistributionParams()) : ShapeTransform(params) {}
-    // Row/column swaps are involutions, but the sequence is not: it is replayed in
-    // reverse order on the way back.
-    void collect_ops(ShapeContext& ctx, std::vector<std::pair<int, std::pair<size_t, size_t>>>& ops) {
-        size_t side = static_cast<size_t>(std::sqrt(ctx.total_elements));
-        if (side < 2) return;
-        size_t count = static_cast<size_t>(side * ctx.params.subdivision_percentage / 100.0);
-        count = std::max(count, size_t(2));
-        for (size_t op = 0; op < count; ++op) {
-            int type = static_cast<int>(ctx.prng.generate_range_i64(0, 1));
-            size_t a = ctx.prng.generate_range_u64(0, side - 1);
-            size_t b = ctx.prng.generate_range_u64(0, side - 1);
-            if (a != b) ops.push_back({type, {a, b}});
-        }
-    }
-    void apply_ops(container_t& data, ShapeContext& ctx,
-                   const std::vector<std::pair<int, std::pair<size_t, size_t>>>& ops, bool reverse) {
-        Grid2D grid(ctx.total_elements);
-        auto run = [&](const std::pair<int, std::pair<size_t, size_t>>& op) {
-            if (op.first == 0) grid.swap_rows(op.second.first, op.second.second, data);
-            else grid.swap_columns(op.second.first, op.second.second, data);
-        };
-        if (reverse) {
-            for (size_t i = ops.size(); i-- > 0;) run(ops[i]);
-        } else {
-            for (const auto& op : ops) run(op);
-        }
-    }
-    void transform(container_t& data, ShapeContext& ctx) override {
-        std::vector<std::pair<int, std::pair<size_t, size_t>>> ops;
-        collect_ops(ctx, ops);
-        apply_ops(data, ctx, ops, false);
-    }
-    void inverse_transform(container_t& data, ShapeContext& ctx) override {
-        std::vector<std::pair<int, std::pair<size_t, size_t>>> ops;
-        collect_ops(ctx, ops);
-        apply_ops(data, ctx, ops, true);
-    }
+    void transform(container_t& data, ShapeContext& ctx) override { apply(data, ctx, false); }
+    void inverse_transform(container_t& data, ShapeContext& ctx) override { apply(data, ctx, true); }
     std::string name() const override { return "SquareTransform"; }
 };
 
 class CircleTransform : public ShapeTransform {
+    void collect_ops(ShapeContext& ctx, std::vector<ShapePermutation>& operations) {
+        if (!std::isfinite(ctx.params.coverage_percentage) ||
+            ctx.params.coverage_percentage < 0 || ctx.params.coverage_percentage > 100 ||
+            !std::isfinite(ctx.params.subdivision_percentage) ||
+            ctx.params.subdivision_percentage < 0 || ctx.params.subdivision_percentage > 100 ||
+            ctx.params.min_subdivision_size < 2 ||
+            ctx.params.max_subdivision_size < ctx.params.min_subdivision_size)
+            throw std::invalid_argument("Invalid circle distribution parameters");
+
+        Grid2D grid(ctx.total_elements);
+        const size_t side = grid.width();
+        if (side < 4 || ctx.params.coverage_percentage == 0) return;
+        const double center = (static_cast<double>(side) - 1.0) / 2.0;
+        const double radius_x = (static_cast<double>(side) / 2.0) *
+            std::sqrt(ctx.params.coverage_percentage / 100.0);
+        const double radius_y = radius_x * 0.72;
+        const size_t ring_count = std::max<size_t>(
+            2, static_cast<size_t>(side * ctx.params.subdivision_percentage / 100.0));
+        std::vector<std::vector<size_t>> rings(ring_count);
+        for (size_t y = 0; y < side; ++y) {
+            for (size_t x = 0; x < side; ++x) {
+                const double dx = (static_cast<double>(x) - center) / radius_x;
+                const double dy = (static_cast<double>(y) - center) / radius_y;
+                const double radial = std::sqrt(dx * dx + dy * dy);
+                if (radial > 1.0) continue;
+                const size_t ring = std::min(
+                    ring_count - 1, static_cast<size_t>(radial * ring_count));
+                rings[ring].push_back(grid.index(x, y));
+            }
+        }
+        auto angle_of = [side, center](size_t index) {
+            const double x = static_cast<double>(index % side) - center;
+            const double y = static_cast<double>(index / side) - center;
+            return std::atan2(y, x);
+        };
+        for (auto& ring : rings) {
+            std::sort(ring.begin(), ring.end(), [&](size_t a, size_t b) {
+                const double aa = angle_of(a), ab = angle_of(b);
+                return aa == ab ? a < b : aa < ab;
+            });
+            if (ring.size() > 1)
+                add_shape_rotation(operations, ring, ctx.prng);
+        }
+
+        for (size_t ring = 0; ring + 1 < rings.size(); ring += 2) {
+            const auto& inner = rings[ring];
+            const auto& outer = rings[ring + 1];
+            const size_t count = std::min(inner.size(), outer.size());
+            ShapePermutation exchange;
+            exchange.pairwise_swap = true;
+            exchange.indices.reserve(count * 2);
+            for (size_t i = 0; i < count; ++i) {
+                exchange.indices.push_back(inner[i]);
+                exchange.indices.push_back(outer[i]);
+            }
+            if (!exchange.indices.empty()) operations.push_back(std::move(exchange));
+        }
+
+        const size_t sweep_count = std::max<size_t>(
+            4, static_cast<size_t>(side * ctx.params.subdivision_percentage / 100.0));
+        for (size_t sweep = 0; sweep < sweep_count; ++sweep) {
+            const double angle = 2.0 * std::acos(-1.0) * sweep / sweep_count;
+            const int x1 = static_cast<int>(std::lround(center + (radius_x - 1) * std::cos(angle)));
+            const int y1 = static_cast<int>(std::lround(center + (radius_y - 1) * std::sin(angle)));
+            auto ray = grid.plot_line(static_cast<int>(std::lround(center)),
+                                      static_cast<int>(std::lround(center)), x1, y1);
+            add_shape_rotation(operations, std::move(ray), ctx.prng);
+        }
+    }
+
+    void apply(container_t& data, ShapeContext& ctx, bool inverse) {
+        std::vector<ShapePermutation> operations;
+        collect_ops(ctx, operations);
+        apply_shape_permutations(data, operations, inverse);
+    }
+
 public:
     explicit CircleTransform(const DistributionParams& params = DistributionParams()) : ShapeTransform(params) {}
-    void rings(ShapeContext& ctx, std::vector<std::vector<size_t>>& out) {
-        size_t side = static_cast<size_t>(std::sqrt(ctx.total_elements));
-        if (side < 4) return;
-        Grid2D grid(ctx.total_elements);
-        size_t radius_count = static_cast<size_t>(side / 2 * ctx.params.subdivision_percentage / 100.0);
-        radius_count = std::max(radius_count, size_t(2));
-        for (size_t r = 1; r <= radius_count; ++r) {
-            std::vector<size_t> indices;
-            for (int angle = 0; angle < 360; angle += 10) {
-                double rad = angle * M_PI / 180.0;
-                int x = static_cast<int>(side / 2 + static_cast<double>(r) * std::cos(rad));
-                int y = static_cast<int>(side / 2 + static_cast<double>(r) * std::sin(rad));
-                if (grid.is_valid(x, y)) indices.push_back(grid.index(x, y));
-            }
-            std::sort(indices.begin(), indices.end());
-            indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
-            if (indices.size() > 1) out.push_back(std::move(indices));
-        }
-    }
-
-    void rotate_rings(container_t& data, ShapeContext& ctx, bool inverse) {
-        std::vector<std::vector<size_t>> ring_list;
-        rings(ctx, ring_list);
-        // Rasterized neighboring circles can overlap. Save the forward shifts
-        // before reversing traversal so each inverse uses the same random choice.
-        std::vector<int64_t> shifts;
-        for (const auto& indices : ring_list) {
-            size_t len = indices.size();
-            int64_t shift = ctx.prng.generate_range_i64(1, static_cast<int64_t>(len) - 1);
-            if (ctx.prng.generate_bool(0.5)) shift = -shift;
-            shifts.push_back(shift);
-        }
-        for (size_t step = 0; step < ring_list.size(); ++step) {
-            size_t ring = inverse ? ring_list.size() - 1 - step : step;
-            const auto& indices = ring_list[ring];
-            size_t len = indices.size();
-            int64_t shift = shifts[ring];
-            if (inverse) shift = -shift;
-            std::vector<uint64_t> values;
-            values.reserve(len);
-            for (size_t idx : indices) values.push_back(data.get_element(idx));
-            for (size_t i = 0; i < len; ++i) {
-                size_t new_idx = indices[(i + shift + static_cast<int64_t>(len)) % static_cast<int64_t>(len)];
-                data.set_element(new_idx, values[i]);
-            }
-        }
-    }
-
-    void transform(container_t& data, ShapeContext& ctx) override { rotate_rings(data, ctx, false); }
-    void inverse_transform(container_t& data, ShapeContext& ctx) override { rotate_rings(data, ctx, true); }
+    void transform(container_t& data, ShapeContext& ctx) override { apply(data, ctx, false); }
+    void inverse_transform(container_t& data, ShapeContext& ctx) override { apply(data, ctx, true); }
     std::string name() const override { return "CircleTransform"; }
 };
 
@@ -2014,7 +2210,6 @@ class RegularPolygonTransform : public ShapeTransform {
         std::vector<size_t> indices;
         size_t x, y, width, height, depth;
     };
-    struct Rotation { std::vector<size_t> indices; size_t shift; };
 
     static void validate(const DistributionParams& p) {
         if (!std::isfinite(p.coverage_percentage) || p.coverage_percentage < 0 || p.coverage_percentage > 100 ||
@@ -2023,71 +2218,172 @@ class RegularPolygonTransform : public ShapeTransform {
             throw std::invalid_argument("Invalid polygon distribution parameters");
     }
 
-    void apply(container_t& data, ShapeContext& ctx, bool inverse) {
+    std::vector<ShapePermutation> make_operations(ShapeContext& ctx) {
         validate(ctx.params);
-        const size_t side = static_cast<size_t>(std::sqrt(ctx.total_elements));
-        if (side < 2 || ctx.params.coverage_percentage == 0) return;
+        Grid2D grid(ctx.total_elements);
+        const size_t side = grid.width();
+        std::vector<ShapePermutation> operations;
+        if (side < 2 || ctx.params.coverage_percentage == 0) return operations;
         const double pi = std::acos(-1.0);
         const double center = double(side - 1) / 2;
-        const double radius = double(side) / 2 * std::sqrt(ctx.params.coverage_percentage / 100);
+        const double radius = double(side) / 2 *
+            std::sqrt(ctx.params.coverage_percentage / 100.0);
         std::array<std::pair<double, double>, Sides> vertices;
         for (size_t i = 0; i < Sides; ++i) {
-            double angle = -pi / 2 + 2 * pi * double(i) / Sides;
-            vertices[i] = {center + radius * std::cos(angle), center + radius * std::sin(angle)};
+            const double angle = -pi / 2 + 2 * pi * double(i) / Sides;
+            vertices[i] = {center + radius * std::cos(angle),
+                           center + radius * std::sin(angle)};
         }
-        Region root{{}, 0, 0, side, side, 0};
-        for (size_t y = 0; y < side; ++y) for (size_t x = 0; x < side; ++x) {
-            bool inside = true;
-            for (size_t i = 0; i < Sides; ++i) {
-                const auto [ax, ay] = vertices[i];
-                const auto [bx, by] = vertices[(i + 1) % Sides];
-                if ((bx-ax)*(double(y)-ay) - (by-ay)*(double(x)-ax) < -1e-9) { inside = false; break; }
-            }
-            if (inside) root.indices.push_back(y * side + x);
-        }
-        std::vector<Region> pending;
-        pending.push_back(std::move(root));
-        std::vector<Rotation> rotations;
-        // Explicit traversal stack avoids call-stack growth for large depth values.
-        // Regions shrink geometrically, so recursion_depth is always an upper bound.
-        while (!pending.empty()) {
-            Region r = std::move(pending.back()); pending.pop_back();
-            if (r.indices.size() < 2) continue;
-            for (size_t start = 0; start < r.indices.size();) {
-                size_t count = std::min(ctx.params.max_subdivision_size, r.indices.size() - start);
-                if (count > 1) {
-                    std::vector<size_t> group(r.indices.begin() + start, r.indices.begin() + start + count);
-                    rotations.push_back({std::move(group), ctx.prng.generate_range_u64(1, count - 1)});
+
+        std::vector<size_t> polygon_points;
+        std::vector<bool> included(grid.total(), false);
+        for (size_t y = 0; y < side; ++y) {
+            for (size_t x = 0; x < side; ++x) {
+                bool inside = false;
+                for (size_t i = 0, j = Sides - 1; i < Sides; j = i++) {
+                    const auto [xi, yi] = vertices[i];
+                    const auto [xj, yj] = vertices[j];
+                    const bool crosses = ((yi > double(y)) != (yj > double(y))) &&
+                        (double(x) < (xj - xi) * (double(y) - yi) /
+                                     (yj - yi) + xi);
+                    if (crosses) inside = !inside;
                 }
+                if (inside) {
+                    const size_t point = grid.index(x, y);
+                    polygon_points.push_back(point);
+                    included[point] = true;
+                }
+            }
+        }
+
+        for (size_t i = 0; i < Sides; ++i) {
+            const auto [x0, y0] = vertices[i];
+            const auto [x1, y1] = vertices[(i + 1) % Sides];
+            auto edge = grid.plot_line(static_cast<int>(std::lround(x0)),
+                                       static_cast<int>(std::lround(y0)),
+                                       static_cast<int>(std::lround(x1)),
+                                       static_cast<int>(std::lround(y1)));
+            for (size_t point : edge) {
+                if (!included[point]) {
+                    polygon_points.push_back(point);
+                    included[point] = true;
+                }
+            }
+        }
+        if (polygon_points.size() < 2) return operations;
+
+        auto add_pieces = [&](std::vector<size_t> points) {
+            std::sort(points.begin(), points.end(), [&](size_t a, size_t b) {
+                const double ax = double(a % side) - center;
+                const double ay = double(a / side) - center;
+                const double bx = double(b % side) - center;
+                const double by = double(b / side) - center;
+                const double angle_a = std::atan2(ay, ax);
+                const double angle_b = std::atan2(by, bx);
+                if (angle_a != angle_b) return angle_a < angle_b;
+                const double radius_a = ax * ax + ay * ay;
+                const double radius_b = bx * bx + by * by;
+                return radius_a == radius_b ? a < b : radius_a < radius_b;
+            });
+            for (size_t start = 0; start < points.size();) {
+                const size_t remaining = points.size() - start;
+                const size_t upper = std::min(ctx.params.max_subdivision_size, remaining);
+                const size_t lower = std::min(ctx.params.min_subdivision_size, upper);
+                const size_t count = lower == upper
+                    ? upper
+                    : static_cast<size_t>(ctx.prng.generate_range_u64(lower, upper));
+                std::vector<size_t> piece(points.begin() + start, points.begin() + start + count);
+                add_shape_rotation(operations, std::move(piece), ctx.prng);
                 start += count;
             }
-            if (!ctx.params.recursive_subdivisions || r.depth >= ctx.params.recursion_depth ||
-                r.indices.size() <= ctx.params.min_subdivision_size || (r.width < 2 && r.height < 2)) continue;
-            const size_t left = r.width / 2, top = r.height / 2;
-            std::array<Region, 4> children{{
-                {{}, r.x, r.y, left, top, r.depth+1},
-                {{}, r.x+left, r.y, r.width-left, top, r.depth+1},
-                {{}, r.x, r.y+top, left, r.height-top, r.depth+1},
-                {{}, r.x+left, r.y+top, r.width-left, r.height-top, r.depth+1}}};
-            for (size_t idx : r.indices) {
-                size_t quadrant = (idx % side >= r.x+left ? 1 : 0) + (idx / side >= r.y+top ? 2 : 0);
-                children[quadrant].indices.push_back(idx);
-            }
-            // Percentage selects how many of the four child regions participate.
-            size_t selected = static_cast<size_t>(4 * ctx.params.subdivision_percentage / 100);
-            for (size_t i = selected; i-- > 0;) if (!children[i].indices.empty())
-                pending.push_back(std::move(children[i]));
-        }
-        auto rotate = [&](const Rotation& r) {
-            const size_t n = r.indices.size();
-            const size_t shift = inverse ? n-r.shift : r.shift;
-            std::vector<uint64_t> values;
-            values.reserve(n);
-            for (size_t idx : r.indices) values.push_back(data.get_element(idx));
-            for (size_t i = 0; i < n; ++i) data.set_element(r.indices[(i+shift)%n], values[i]);
         };
-        if (inverse) { for (size_t i = rotations.size(); i-- > 0;) rotate(rotations[i]); }
-        else { for (const auto& r : rotations) rotate(r); }
+
+        if constexpr (Sides == 3) {
+            std::array<std::vector<size_t>, 3> sides;
+            for (size_t point : polygon_points) {
+                const double x = double(point % side), y = double(point / side);
+                size_t closest = 0;
+                double nearest = std::numeric_limits<double>::max();
+                for (size_t vertex = 0; vertex < vertices.size(); ++vertex) {
+                    const double dx = x - vertices[vertex].first;
+                    const double dy = y - vertices[vertex].second;
+                    const double distance = dx * dx + dy * dy;
+                    if (distance < nearest) {
+                        nearest = distance;
+                        closest = vertex;
+                    }
+                }
+                sides[closest].push_back(point);
+            }
+            for (const auto& side_points : sides) add_pieces(side_points);
+            std::sort(sides[1].begin(), sides[1].end());
+            std::sort(sides[2].begin(), sides[2].end());
+            const size_t paired = std::min(sides[1].size(), sides[2].size());
+            ShapePermutation exchange;
+            exchange.pairwise_swap = true;
+            exchange.indices.reserve(paired * 2);
+            for (size_t i = 0; i < paired; ++i) {
+                exchange.indices.push_back(sides[1][i]);
+                exchange.indices.push_back(sides[2][i]);
+            }
+            if (!exchange.indices.empty()) operations.push_back(std::move(exchange));
+
+            const int cx = static_cast<int>(std::lround(center));
+            const int cy = static_cast<int>(std::lround(center));
+            for (const auto& [vx, vy] : vertices) {
+                auto median = grid.plot_line(cx, cy, static_cast<int>(std::lround(vx)),
+                                             static_cast<int>(std::lround(vy)));
+                add_shape_rotation(operations, std::move(median), ctx.prng);
+            }
+        } else {
+            std::vector<Region> pending;
+            pending.push_back({polygon_points, 0, 0, side, side, 0});
+            while (!pending.empty()) {
+                Region region = std::move(pending.back());
+                pending.pop_back();
+                if (region.indices.size() < 2) continue;
+                const size_t left = region.width / 2;
+                const size_t top = region.height / 2;
+                if (ctx.params.recursive_subdivisions &&
+                    region.depth < ctx.params.recursion_depth &&
+                    region.indices.size() > ctx.params.min_subdivision_size &&
+                    region.width > 1 && region.height > 1) {
+                    std::array<Region, 4> children{{
+                        {{}, region.x, region.y, left, top, region.depth + 1},
+                        {{}, region.x + left, region.y, region.width - left,
+                         top, region.depth + 1},
+                        {{}, region.x, region.y + top, left, region.height - top,
+                         region.depth + 1},
+                        {{}, region.x + left, region.y + top, region.width - left,
+                         region.height - top, region.depth + 1}}};
+                    for (size_t point : region.indices) {
+                        const size_t quadrant =
+                            (point % side >= region.x + left ? 1 : 0) +
+                            (point / side >= region.y + top ? 2 : 0);
+                        children[quadrant].indices.push_back(point);
+                    }
+                    std::array<size_t, 4> order{0, 1, 2, 3};
+                    for (size_t i = order.size(); i > 1; --i) {
+                        const size_t j = ctx.prng.generate_range_u64(0, i - 1);
+                        std::swap(order[i - 1], order[j]);
+                    }
+                    size_t selected = static_cast<size_t>(
+                        std::ceil(4.0 * ctx.params.subdivision_percentage / 100.0));
+                    if (ctx.params.subdivision_percentage > 0)
+                        selected = std::max<size_t>(1, selected);
+                    for (size_t i = 0; i < selected; ++i)
+                        if (!children[order[i]].indices.empty())
+                            pending.push_back(std::move(children[order[i]]));
+                }
+                add_pieces(std::move(region.indices));
+            }
+        }
+        return operations;
+    }
+
+    void apply(container_t& data, ShapeContext& ctx, bool inverse) {
+        auto operations = make_operations(ctx);
+        apply_shape_permutations(data, operations, inverse);
     }
 public:
     explicit RegularPolygonTransform(const DistributionParams& params = DistributionParams()) : ShapeTransform(params) {}
@@ -2205,6 +2501,7 @@ private:
     std::vector<uint8_t> m_electronic_password;
     std::vector<std::unique_ptr<ShapeTransform>> m_custom_transforms;
     std::vector<BitMode> m_mode_stack;
+    std::array<std::vector<BitMode>, sizeof...(Operations) + 1> m_mode_history;
     StealthStorage m_stealth;
     DirectoryManager m_directory;
     
@@ -3126,53 +3423,76 @@ private:
         return modes[index % 8];
     }
 
+    void apply_mode_xor(container_t& data, BitMode mode) {
+        const size_t bits = std::min<size_t>(64, bit_mode_to_size(data.global_mode()));
+        const size_t lane_bits = std::min(bits, bit_mode_to_size(mode));
+        if (lane_bits == 0) return;
+        for (size_t element = 0; element < data.element_count(); ++element) {
+            uint64_t value = data.get_element(element);
+            for (size_t offset = 0; offset < bits; offset += lane_bits) {
+                const size_t width = std::min(lane_bits, bits - offset);
+                value ^= (m_prng.generate_u64() & element_mask(width)) << offset;
+            }
+            data.set_element(element, value);
+        }
+    }
+
     void apply_push_mode(container_t& data) {
-        (void)data;   // mode-stack operation: shares the operation signature only
-        m_mode_stack.push_back(random_mode(m_prng.generate_range_u64(0, 7)));
+        const BitMode mode = random_mode(m_prng.generate_range_u64(0, 7));
+        m_mode_stack.push_back(mode);
+        apply_mode_xor(data, mode);
     }
 
     void unapply_push_mode(container_t& data) {
-        (void)data;   // mode-stack operation: shares the operation signature only
+        const BitMode mode = random_mode(m_prng.generate_range_u64(0, 7));
+        apply_mode_xor(data, mode);
         if (m_mode_stack.size() > 1) m_mode_stack.pop_back();
     }
 
     void apply_pop_mode(container_t& data) {
-        (void)data;   // mode-stack operation: shares the operation signature only
+        const BitMode mode = random_mode(m_prng.generate_u64());
+        apply_mode_xor(data, mode);
         if (m_mode_stack.size() > 1) m_mode_stack.pop_back();
     }
 
     void unapply_pop_mode(container_t& data) {
-        (void)data;   // mode-stack operation: shares the operation signature only
-        m_mode_stack.push_back(random_mode(m_prng.generate_range_u64(0, 7)));
+        const BitMode mode = random_mode(m_prng.generate_u64());
+        apply_mode_xor(data, mode);
+        m_mode_stack.push_back(mode);
     }
 
     void apply_switch_mode(container_t& data) {
-        (void)data;   // mode-stack operation: shares the operation signature only
-        if (m_mode_stack.size() < 2) return;
-        size_t i = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
-        std::swap(m_mode_stack.back(), m_mode_stack[i]);
+        if (m_mode_stack.size() >= 2) {
+            size_t i = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
+            std::swap(m_mode_stack.back(), m_mode_stack[i]);
+        }
+        apply_mode_xor(data, random_mode(m_prng.generate_u64()));
     }
 
     void apply_mode_cycle(container_t& data) {
-        (void)data;   // mode-stack operation: shares the operation signature only
-        if (m_mode_stack.empty()) return;
-        size_t s = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
-        std::rotate(m_mode_stack.begin(), m_mode_stack.begin() + s, m_mode_stack.end());
+        size_t s = 0;
+        if (!m_mode_stack.empty()) {
+            s = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
+            std::rotate(m_mode_stack.begin(), m_mode_stack.begin() + s, m_mode_stack.end());
+        }
+        apply_mode_xor(data, random_mode(s));
     }
 
     void unapply_mode_cycle(container_t& data) {
-        (void)data;   // mode-stack operation: shares the operation signature only
-        if (m_mode_stack.empty()) return;
-        size_t s = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
-        size_t back = (m_mode_stack.size() - s) % m_mode_stack.size();
-        std::rotate(m_mode_stack.begin(), m_mode_stack.begin() + back, m_mode_stack.end());
+        size_t s = 0;
+        if (!m_mode_stack.empty()) {
+            s = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
+            size_t back = (m_mode_stack.size() - s) % m_mode_stack.size();
+            std::rotate(m_mode_stack.begin(), m_mode_stack.begin() + back, m_mode_stack.end());
+        }
+        apply_mode_xor(data, random_mode(s));
     }
 
     // Derived from the keystream rather than from the data, so it stays reproducible.
     void apply_mode_feedback(container_t& data) {
-        (void)data;   // mode-stack operation: shares the operation signature only
-        if (m_mode_stack.empty()) return;
-        m_mode_stack.back() = random_mode(m_prng.generate_u64());
+        const BitMode mode = random_mode(m_prng.generate_u64());
+        if (!m_mode_stack.empty()) m_mode_stack.back() = mode;
+        apply_mode_xor(data, mode);
     }
 
     // ============================================================================
@@ -3790,7 +4110,7 @@ private:
 
     void apply_transform(ShapeTransform* transform, container_t& data, bool inverse) {
         ShapeContext ctx(m_prng, m_settings.shape_distribution,
-                         data.element_count(), m_settings.bit_mode);
+                         data.element_count(), data.global_mode());
         if (inverse) transform->inverse_transform(data, ctx);
         else transform->transform(data, ctx);
     }
@@ -3947,19 +4267,88 @@ private:
         return 0x9E3779B97F4A7C15ULL * (static_cast<uint64_t>(index) + 1);
     }
 
+    static constexpr uint64_t mode_mask_before = 0xA0761D6478BD642FULL;
+    static constexpr uint64_t mode_mask_after = 0xE7037ED1A0B428DBULL;
+
+    template<typename T>
+    static constexpr bool is_mode_operation =
+        std::is_same_v<T, PushMode> || std::is_same_v<T, PopMode> ||
+        std::is_same_v<T, SwitchMode> || std::is_same_v<T, ModeCycle> ||
+        std::is_same_v<T, ModeFeedback>;
+
+    template<typename T, size_t Index>
+    void simulate_mode_operation() {
+        m_prng.reseed(op_token(Index));
+        if constexpr (std::is_same_v<T, PushMode>) {
+            m_mode_stack.push_back(random_mode(m_prng.generate_range_u64(0, 7)));
+        } else if constexpr (std::is_same_v<T, PopMode>) {
+            (void)m_prng.generate_u64();
+            if (m_mode_stack.size() > 1) m_mode_stack.pop_back();
+        } else if constexpr (std::is_same_v<T, SwitchMode>) {
+            if (m_mode_stack.size() >= 2) {
+                const size_t i = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
+                std::swap(m_mode_stack.back(), m_mode_stack[i]);
+            }
+            (void)m_prng.generate_u64();
+        } else if constexpr (std::is_same_v<T, ModeCycle>) {
+            if (!m_mode_stack.empty()) {
+                const size_t shift = m_prng.generate_range_u64(0, m_mode_stack.size() - 1);
+                std::rotate(m_mode_stack.begin(), m_mode_stack.begin() + shift, m_mode_stack.end());
+            }
+        } else if constexpr (std::is_same_v<T, ModeFeedback>) {
+            const BitMode mode = random_mode(m_prng.generate_u64());
+            if (!m_mode_stack.empty()) m_mode_stack.back() = mode;
+        }
+        m_mode_history[Index + 1] = m_mode_stack;
+    }
+
+    template<size_t... Is>
+    void prepare_mode_history(std::index_sequence<Is...>) {
+        (simulate_mode_operation<Operations, Is>(), ...);
+    }
+
     template<typename T, size_t Index>
     void run_forward(container_t& data) {
-        m_prng.reseed(op_token(Index));
         data.begin_bulk();
-        apply_operation<T>(data);
+        if constexpr (is_mode_operation<T>) {
+            m_prng.reseed(op_token(Index));
+            apply_operation<T>(data);
+        } else if (m_mode_stack.size() > 1) {
+            const BitMode mode = current_mode();
+            m_prng.reseed(op_token(Index) ^ mode_mask_before);
+            apply_mode_xor(data, mode);
+            m_prng.reseed(op_token(Index));
+            apply_operation<T>(data);
+            m_prng.reseed(op_token(Index) ^ mode_mask_after);
+            apply_mode_xor(data, mode);
+        } else {
+            m_prng.reseed(op_token(Index));
+            apply_operation<T>(data);
+        }
+        m_mode_history[Index + 1] = m_mode_stack;
         data.end_bulk();
     }
 
     template<typename T, size_t Index>
     void run_inverse(container_t& data) {
-        m_prng.reseed(op_token(Index));
+        m_mode_stack = m_mode_history[Index + 1];
         data.begin_bulk();
-        apply_reverse_operation<T>(data);
+        if constexpr (is_mode_operation<T>) {
+            m_prng.reseed(op_token(Index));
+            apply_reverse_operation<T>(data);
+        } else if (m_mode_stack.size() > 1) {
+            const BitMode mode = current_mode();
+            m_prng.reseed(op_token(Index) ^ mode_mask_after);
+            apply_mode_xor(data, mode);
+            m_prng.reseed(op_token(Index));
+            apply_reverse_operation<T>(data);
+            m_prng.reseed(op_token(Index) ^ mode_mask_before);
+            apply_mode_xor(data, mode);
+        } else {
+            m_prng.reseed(op_token(Index));
+            apply_reverse_operation<T>(data);
+        }
+        m_mode_stack = m_mode_history[Index];
         data.end_bulk();
     }
 
@@ -4134,6 +4523,8 @@ public:
         if (target.element_count() == 0) {
             throw std::runtime_error("No data to encrypt");
         }
+        m_mode_stack.assign(1, target.global_mode());
+        m_mode_history[0] = m_mode_stack;
 
         // Pad *before* the operations run. Padding afterwards would change the
         // element count between encryption and decryption, and every length-aware
@@ -4177,6 +4568,9 @@ public:
         if (target.element_count() == 0) {
             throw std::runtime_error("No data to decrypt");
         }
+        m_mode_stack.assign(1, target.global_mode());
+        m_mode_history[0] = m_mode_stack;
+        prepare_mode_history(std::index_sequence_for<Operations...>{});
 
         for (size_t k = m_custom_transforms.size(); k-- > 0;) {
             m_prng.reseed(op_token(0x10000 + k));
