@@ -1,6 +1,7 @@
 #include "../genetic_cipher.hpp"
 #include <iostream>
 #include <limits>
+#include <set>
 using namespace genetic_cipher;
 size_t checks = 0;
 void check(bool ok) { ++checks; if (!ok) throw std::runtime_error("shape/stack check " + std::to_string(checks)); }
@@ -14,6 +15,26 @@ container_t input(size_t n, BitMode mode = BitMode::WORD64) {
     container_t c(4096, mode);
     for (size_t i = 0; i < n; ++i) c.append_element(i); // many storage nodes
     return c;
+}
+container_t packed_bytes(const std::vector<uint8_t>& bytes, BitMode mode) {
+    const size_t width = bit_mode_to_size(mode);
+    std::vector<uint64_t> values;
+    uint64_t value = 0;
+    size_t used = 0;
+    for (uint8_t byte : bytes) {
+        for (int bit = 7; bit >= 0; --bit) {
+            value = (value << 1) | ((byte >> bit) & 1u);
+            if (++used == width) {
+                values.push_back(value);
+                value = 0;
+                used = 0;
+            }
+        }
+    }
+    if (used) values.push_back(value << (width - used));
+    container_t result(4096, mode);
+    result.append_elements(values.data(), values.size());
+    return result;
 }
 template<class Shape> void shapes() {
     for (auto mode : {BitMode::BIT_1, BitMode::BIT_2, BitMode::BIT_3, BitMode::NIBBLE,
@@ -33,6 +54,9 @@ template<class Shape> void shapes() {
     }
 }
 int main() {
+    Grid2D line_grid(100);
+    const auto diagonal = line_grid.plot_line(0, 0, 9, 6);
+    check(diagonal.size() >= 10 && diagonal.front() == 0 && diagonal.back() == 69);
     shapes<TriangleTransform>(); shapes<PentagonTransform>(); shapes<HexagonTransform>();
     shapes<OctagonTransform>(); shapes<RegularPolygonTransform<7>>();
     auto p = input(1025);
@@ -74,12 +98,51 @@ int main() {
         auto enc=writer.encrypt(p); check(reader.decrypt(enc).to_bytes()==p.to_bytes());
         Nested fresh; configure(fresh); check(fresh.decrypt(enc).to_bytes()==p.to_bytes());
     }
-    // Existing stack tags do not change the data width. No-op payload verifies
-    // this contract without comparing operations at different PRNG positions.
+
     GeneticCipher<PushMode,PushMode,SwitchMode,ModeCycle,ModeFeedback,PopMode,PopMode> stack;
-    configure(stack); auto unchanged=stack.encrypt(p); check(unchanged.to_bytes()==p.to_bytes());
-    check(stack.decrypt(unchanged).to_bytes()==p.to_bytes());
+    configure(stack); auto transformed=stack.encrypt(p);
+    check(transformed.to_bytes()!=p.to_bytes());
+    check(stack.decrypt(transformed).to_bytes()==p.to_bytes());
     GeneticCipher<PopMode,PopMode,PushMode,PopMode> underflow;
     configure(underflow); check(underflow.decrypt(underflow.encrypt(p)).to_bytes()==p.to_bytes());
+
+    using WrappedShapes = GeneticCipher<PushMode, SquareTransform, Scatter, PopMode,
+        PushMode, CircleTransform, Shuffle, PopMode, PushMode, TriangleTransform,
+        Diffuse, PopMode>;
+    WrappedShapes shape_writer, shape_reader;
+    configure(shape_writer); configure(shape_reader);
+    const auto wrapped = shape_writer.encrypt(p);
+    check(wrapped.to_bytes() != p.to_bytes());
+    check(shape_reader.decrypt(wrapped).to_bytes() == p.to_bytes());
+
+    const auto geometry_source = input(1024, BitMode::BYTE);
+    GeneticCipher<TriangleTransform> triangle_writer, triangle_reader;
+    configure(triangle_writer); configure(triangle_reader);
+    const auto triangle_cipher = triangle_writer.encrypt(geometry_source);
+    check(triangle_cipher.to_bytes() != geometry_source.to_bytes());
+    check(triangle_reader.decrypt(triangle_cipher).to_bytes() == geometry_source.to_bytes());
+
+    const auto plain_bytes = input(64, BitMode::BYTE).to_bytes();
+    std::vector<std::vector<uint8_t>> width_outputs;
+    for (auto mode : {BitMode::BIT_1, BitMode::BIT_2, BitMode::BIT_3, BitMode::NIBBLE,
+                      BitMode::BIT_5, BitMode::BIT_6, BitMode::BYTE, BitMode::WORD16,
+                      BitMode::WORD32, BitMode::WORD64}) {
+        auto source = packed_bytes(plain_bytes, mode);
+        GeneticCipher<TransformChaCha, SquareTransform> enc, dec;
+        configure(enc); configure(dec);
+        const auto cipher = enc.encrypt(source);
+        check(dec.decrypt(cipher).to_elements() == source.to_elements());
+        width_outputs.push_back(cipher.to_bytes());
+    }
+    check(std::set<std::vector<uint8_t>>(width_outputs.begin(), width_outputs.end()).size() == 10);
+
+    for (auto mode : {BitMode::BYTE, BitMode::WORD16, BitMode::WORD32, BitMode::WORD64}) {
+        const auto source = input(1024, mode);
+        GeneticCipher<CircleTransform> enc, dec;
+        configure(enc); configure(dec);
+        const auto cipher = enc.encrypt(source);
+        check(cipher.to_bytes() != source.to_bytes());
+        check(dec.decrypt(cipher).to_bytes() == source.to_bytes());
+    }
     std::cout << checks << " shape and nested stack checks passed\n";
 }
