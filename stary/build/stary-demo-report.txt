@@ -1,0 +1,625 @@
+BUILD OUTPUTS
+==============
+[ 50%] Built target stary
+[100%] Built target stary_tests
+[ 33%] Built target engine_tests
+[ 66%] Built target demo
+[100%] Built target shape_tests
+[ 33%] Built target engine_tests
+[ 66%] Built target demo
+[100%] Built target shape_tests
+
+STARY TESTS
+===========
+Internal ctest changing into directory: /workspaces/genetic_cipher/stary/build
+UpdateCTestConfiguration  from :/workspaces/genetic_cipher/stary/build/DartConfiguration.tcl
+UpdateCTestConfiguration  from :/workspaces/genetic_cipher/stary/build/DartConfiguration.tcl
+Test project /workspaces/genetic_cipher/stary/build
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 1
+    Start 1: stary_tests
+
+1: Test command: /workspaces/genetic_cipher/stary/build/stary_tests
+1: Working Directory: /workspaces/genetic_cipher/stary/build
+1: Test timeout computed to be: 10000000
+1: PASS: password-file binary file round trip and progress
+1: 
+1: PASS: empty file round trip
+1: 
+1: PASS: raw-key file round trip
+1: 
+1: PASS: electronic-password file with spaces
+1: 
+1: PASS: nested directory package round trip
+1: 
+1: PASS: terminal text round trip and invalid envelope rejection
+1: 
+1: PASS: ten bit-width envelope round trips and width-dependent output
+1: 
+1: PASSED stary tests (0 failures)
+1/1 Test #1: stary_tests ......................   Passed    0.05 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   0.05 sec
+
+ENGINE AND SHAPE TESTS
+======================
+Internal ctest changing into directory: /tmp/genetic-cipher-build
+UpdateCTestConfiguration  from :/tmp/genetic-cipher-build/DartConfiguration.tcl
+UpdateCTestConfiguration  from :/tmp/genetic-cipher-build/DartConfiguration.tcl
+Test project /tmp/genetic-cipher-build
+Constructing a list of tests
+Done constructing a list of tests
+Updating test list for fixtures
+Added 0 tests to meet fixture requirements
+Checking test dependency graph...
+Checking test dependency graph end
+test 1
+    Start 1: engine_tests
+
+1: Test command: /tmp/genetic-cipher-build/engine_tests
+1: Working Directory: /tmp/genetic-cipher-build
+1: Test timeout computed to be: 10000000
+1: 5332 checks, 0 failures
+1/2 Test #1: engine_tests .....................   Passed    1.19 sec
+test 3
+    Start 3: shape_tests
+
+3: Test command: /tmp/genetic-cipher-build/shape_tests
+3: Working Directory: /tmp/genetic-cipher-build
+3: Test timeout computed to be: 10000000
+3: 16920 shape and nested stack checks passed
+2/2 Test #3: shape_tests ......................   Passed    2.40 sec
+
+The following tests passed:
+	engine_tests
+	shape_tests
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   3.58 sec
+
+SANITIZER TESTS
+===============
+Internal ctest changing into directory: /tmp/genetic-cipher-sanitized
+Test project /tmp/genetic-cipher-sanitized
+    Start 1: engine_tests
+1/2 Test #1: engine_tests .....................   Passed    2.52 sec
+    Start 3: shape_tests
+2/2 Test #3: shape_tests ......................   Passed    5.92 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   8.44 sec
+
+STARY CLI WIDTH / ELECTRONIC-PASSWORD INTEGRATION
+==================================================
+Options: --text --password-file <temporary> --electronic-password-file <temporary> --bit-width BITS
+Stack: PushMode + SquareTransform + Scatter + PopMode; PushMode + CircleTransform + Shuffle + PopMode; PushMode + TriangleTransform + Diffuse + PopMode; PushMode + Mix + TransformChaCha + PopMode.
+Electronic-password file contains a first-line value with spaces; both credential files are deleted after the run.
+Input: Hellow world from anthony matarazzo (c) 2026 genetic encryption.
+
+Input hex:
+000000 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f  >Hellow world fro<
+000010 6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61  >m anthony matara<
+000020 7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e  >zzo (c) 2026 gen<
+000030 65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e  >etic encryption.<
+000040
+
+-- 1-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIAAUACAAAAAAAA/SlepAOKp8ItrZnktUBwKJ0vOOXUIZZuZcODI6xsftF/xy/Kj67G/IhGId6R0ZEyyrIGM0XSxJK1ki6vIPEfdB4/rdvV//Xp
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 01 40 02 00 00 00 00  >STGC0002..@.....<
+000010 00 00 fd 29 5e a4 03 8a a7 c2 2d ad 99 e4 b5 40  >...)^.....-....@<
+000020 70 28 9d 2f 38 e5 d4 21 96 6e 65 c3 83 23 ac 6c  >p(./8..!.ne..#.l<
+000030 7e d1 7f c7 2f ca 8f ae c6 fc 88 46 21 de 91 d1  >~.../......F!...<
+000040 91 32 ca b2 06 33 45 d2 c4 92 b5 92 2e af 20 f1  >.2...3E....... .<
+000050 1f 74 1e 3f ad db d5 ff f5 e9                    >.t.?......<
+00005a
+
+-- 2-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIAAiABAAAAAAAAj7coS0l5GPzdqQbZv6dJb4uEhtQWwM6+0dkQa0WvaqsKge80ovXVxdG6l50e3dTTSSEaTQyMfDlwnFOMUPGCrmZpByaC9hV+
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 02 20 01 00 00 00 00  >STGC0002.. .....<
+000010 00 00 8f b7 28 4b 49 79 18 fc dd a9 06 d9 bf a7  >....(KIy........<
+000020 49 6f 8b 84 86 d4 16 c0 ce be d1 d9 10 6b 45 af  >Io...........kE.<
+000030 6a ab 0a 81 ef 34 a2 f5 d5 c5 d1 ba 97 9d 1e dd  >j....4..........<
+000040 d4 d3 49 21 1a 4d 0c 8c 7c 39 70 9c 53 8c 50 f1  >..I!.M..|9p.S.P.<
+000050 82 ae 66 69 07 26 82 f6 15 7e                    >..fi.&...~<
+00005a
+
+-- 3-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIAA8AAAAAAAAAA0y8eCihoKa+LZx0FWrYcEVjTrJ1QW2sA9SwxDpNYAWCW0ESMqV6iKiWR9ZLpVqLQgxyC9Vkniq3qtpCTTPfePGdGo6S4XDCc
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 03 c0 00 00 00 00 00  >STGC0002........<
+000010 00 00 d3 2f 1e 0a 28 68 29 af 8b 67 1d 05 5a b6  >.../..(h)..g..Z.<
+000020 1c 11 58 d3 ac 9d 50 5b 6b 00 f5 2c 31 0e 93 58  >..X...P[k..,1..X<
+000030 01 60 96 d0 44 8c a9 5e a2 2a 25 91 f5 92 e9 56  >.`..D..^.*%....V<
+000040 a2 d0 83 1c 82 f5 59 27 8a ad ea b6 90 93 4c f7  >......Y'......L.<
+000050 de 3c 67 46 a3 a4 b8 5c 30 9c                    >.<gF...\0.<
+00005a
+
+-- 4-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIABJAAAAAAAAAARlrtl1gsJuof9vB7w1aLWFt9oqNd5uKBRERKbs2WivHFerdqUDeEKk/c90f5FXywyviHyyrTNsNCkGSEmFR7fDpKr84/yHh2
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 04 90 00 00 00 00 00  >STGC0002........<
+000010 00 00 46 5a ed 97 58 2c 26 ea 1f f6 f0 7b c3 56  >..FZ..X,&....{.V<
+000020 8b 58 5b 7d a2 a3 5d e6 e2 81 44 44 4a 6e cd 96  >.X[}..]...DDJn..<
+000030 8a f1 c5 7a b7 6a 50 37 84 2a 4f dc f7 47 f9 15  >...z.jP7.*O..G..<
+000040 7c b0 ca f8 87 cb 2a d3 36 c3 42 90 64 84 98 54  >|.....*.6.B.d..T<
+000050 7b 7c 3a 4a af ce 3f c8 78 76                    >{|:J..?.xv<
+00005a
+
+-- 5-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIABXQAAAAAAAAAu879yLI5JMmJgOnBnM4G4LIcbLgKs+OJW/+utBo+vtvj+1RWWBbFBhUaOAcWmL6uxWZUtJKEgB6otfOXO/13ewna1I3FK3np4A==
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 05 74 00 00 00 00 00  >STGC0002..t.....<
+000010 00 00 bb ce fd c8 b2 39 24 c9 89 80 e9 c1 9c ce  >.......9$.......<
+000020 06 e0 b2 1c 6c b8 0a b3 e3 89 5b ff ae b4 1a 3e  >....l.....[....><
+000030 be db e3 fb 54 56 58 16 c5 06 15 1a 38 07 16 98  >....TVX.....8...<
+000040 be ae c5 66 54 b4 92 84 80 1e a8 b5 f3 97 3b fd  >...fT.........;.<
+000050 77 7b 09 da d4 8d c5 2b 79 e9 e0                 >w{.....+y..<
+00005b
+
+-- 6-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIABmAAAAAAAAAAXffTagqR5ue9EN/s5l4nTnGfMULxMU7VURBDZh+jXSzVTuyriTFMGTilX0sTfIoowFF5xh73deqrwzzd3Euq3M5BOwdo//Hl
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 06 60 00 00 00 00 00  >STGC0002..`.....<
+000010 00 00 5d f7 d3 6a 0a 91 e6 e7 bd 10 df ec e6 5e  >..]..j.........^<
+000020 27 4e 71 9f 31 42 f1 31 4e d5 51 10 43 66 1f a3  >'Nq.1B.1N.Q.Cf..<
+000030 5d 2c d5 4e ec ab 89 31 4c 19 38 a5 5f 4b 13 7c  >],.N...1L.8._K.|<
+000040 8a 28 c0 51 79 c6 1e f7 75 ea ab c3 3c dd dc 4b  >.(.Qy...u...<..K<
+000050 aa dc ce 41 3b 07 68 ff f1 e5                    >...A;.h...<
+00005a
+
+-- 8-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIACEgAAAAAAAAAqb2mFpKKLNtTNSHnozzF22IEEtrzQu0m1Geww8rXBufSiRY1HcXtoriyWfTLTYm4shROYDURaW6Y29mH2ciguNdzGD69UJhY
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 08 48 00 00 00 00 00  >STGC0002..H.....<
+000010 00 00 a9 bd a6 16 92 8a 2c db 53 35 21 e7 a3 3c  >........,.S5!..<<
+000020 c5 db 62 04 12 da f3 42 ed 26 d4 67 b0 c3 ca d7  >..b....B.&.g....<
+000030 06 e7 d2 89 16 35 1d c5 ed a2 b8 b2 59 f4 cb 4d  >.....5......Y..M<
+000040 89 b8 b2 14 4e 60 35 11 69 6e 98 db d9 87 d9 c8  >....N`5.in......<
+000050 a0 b8 d7 73 18 3e bd 50 98 58                    >...s.>.P.X<
+00005a
+
+-- 16-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIAECQAAAAAAAAA3JB1ew+Cja/WxqnkzXVfu4/1Xc0E5Oxvg2SKzc8e8YMQO+7lK90WjGjg2/cSWoI+n8rkw7AF996ZJbvcYf5eCLrnDaoFBTCn
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 10 24 00 00 00 00 00  >STGC0002..$.....<
+000010 00 00 dc 90 75 7b 0f 82 8d af d6 c6 a9 e4 cd 75  >....u{.........u<
+000020 5f bb 8f f5 5d cd 04 e4 ec 6f 83 64 8a cd cf 1e  >_...]....o.d....<
+000030 f1 83 10 3b ee e5 2b dd 16 8c 68 e0 db f7 12 5a  >...;..+...h....Z<
+000040 82 3e 9f ca e4 c3 b0 05 f7 de 99 25 bb dc 61 fe  >.>.........%..a.<
+000050 5e 08 ba e7 0d aa 05 05 30 a7                    >^.......0.<
+00005a
+
+-- 32-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIAIBIAAAAAAAAA/FMbb/DFblWbRSKmx5jDqs8lGh3jrFVh8QNyYT42L7ba+WtEt1bDFRIP3VCNAsq/UZjWrhU3GtMsdYF6k7TErL0TAYP4cwB9
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 20 12 00 00 00 00 00  >STGC0002. ......<
+000010 00 00 fc 53 1b 6f f0 c5 6e 55 9b 45 22 a6 c7 98  >...S.o..nU.E"...<
+000020 c3 aa cf 25 1a 1d e3 ac 55 61 f1 03 72 61 3e 36  >...%....Ua..ra>6<
+000030 2f b6 da f9 6b 44 b7 56 c3 15 12 0f dd 50 8d 02  >/...kD.V.....P..<
+000040 ca bf 51 98 d6 ae 15 37 1a d3 2c 75 81 7a 93 b4  >..Q....7..,u.z..<
+000050 c4 ac bd 13 01 83 f8 73 00 7d                    >.......s.}<
+00005a
+
+-- 64-bit mode (round-trip PASS) --
+Base64: U1RHQzAwMDIAQAkAAAAAAAAATRG+xIZWGEMqWxzuR2GX7vBF8j/JsiQjLFpwQzyxbP1iIP5n1eX/kdX4IFYI0Wf6Tj3lARnMkjEXMRm/3t7XgXZI7lziHNPM
+Envelope hexdump:
+000000 53 54 47 43 30 30 30 32 00 40 09 00 00 00 00 00  >STGC0002.@......<
+000010 00 00 4d 11 be c4 86 56 18 43 2a 5b 1c ee 47 61  >..M....V.C*[..Ga<
+000020 97 ee f0 45 f2 3f c9 b2 24 23 2c 5a 70 43 3c b1  >...E.?..$#,ZpC<.<
+000030 6c fd 62 20 fe 67 d5 e5 ff 91 d5 f8 20 56 08 d1  >l.b .g...... V..<
+000040 67 fa 4e 3d e5 01 19 cc 92 31 17 31 19 bf de de  >g.N=.....1.1....<
+000050 d7 81 76 48 ee 5c e2 1c d3 cc                    >..vH.\....<
+00005a
+
+File-mode integration: 16-bit encrypted file round-trip PASS
+
+COMPOSED STACK HEX DUMPS
+=======================
+These are direct GeneticCipher outputs (without the STGC envelope). Each stack is round-trip checked at all ten scalar widths. The labels are examples, not security rankings.
+
+TransformXorShift (demo only; not a security rating)
+  1-bit elements; 64 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+
+  2-bit elements; 64 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+
+  3-bit elements; 65 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+       00 
+
+  4-bit elements; 64 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+
+  5-bit elements; 65 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+       00 
+
+  6-bit elements; 65 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+       00 
+
+  8-bit elements; 64 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+
+  16-bit elements; 64 bytes; round-trip PASS
+  hex: e9 b5 ed b4 8e 69 c1 f7 2f 2c ed bc e1 a6 93 4b 
+       6d fa a0 2c 74 80 ae 30 79 d2 4d fb 54 c9 52 c5 
+       3a 0e 6f fe 48 f3 29 72 32 54 f3 d2 c1 e7 a4 24 
+       e4 be 09 71 81 65 0e 7f 52 dd f1 94 88 7d af 72 
+
+  32-bit elements; 64 bytes; round-trip PASS
+  hex: 9f 4b 3d b4 ed 81 33 f7 01 c3 11 bc 65 61 c5 4b 
+       15 97 ba 2c 31 16 a4 30 df 93 55 fb 4b 13 08 c5 
+       90 0d 53 fe 03 39 a7 72 0b ba 1f d2 ad 1b 30 24 
+       9b 6a b9 71 34 4c 5c 7f 63 e7 1f 94 73 47 fb 72 
+
+  64-bit elements; 64 bytes; round-trip PASS
+  hex: 84 a0 2c 9f e9 81 33 f7 09 cb 6a 57 b5 61 c5 4b 
+       08 b6 ca 51 f7 16 a4 30 c2 b0 5a 58 91 13 08 c5 
+       9a 01 7d 43 5b 39 a7 72 03 b3 69 70 d9 1b 30 24 
+       93 62 18 11 ea 4c 5c 7f 79 89 7d e4 c1 47 fb 72 
+
+TransformChaCha experimental tag (demo only; not a security rating)
+  1-bit elements; 64 bytes; round-trip PASS
+  hex: e5 34 3b 3b 3c 99 d0 99 3c 9d 3b 3e d0 33 9d 3c 
+       31 d0 3a 36 9e 35 3c 36 9f d0 31 3a 9e 3a 9d 3a 
+       98 98 3c d0 d5 37 df d0 7d 70 7d 73 d0 39 34 36 
+       34 9e 3f 37 d0 34 36 37 9d 9f 90 9e 3f 3c 36 d6 
+
+  2-bit elements; 64 bytes; round-trip PASS
+  hex: 31 06 e8 e8 2c f0 a8 f0 2c 47 e8 4a a8 c2 47 2c 
+       a4 a8 fd 60 9e 99 2c 60 01 a8 a4 fd 9e fd 47 fd 
+       e5 e5 2c a8 0a 75 4e a8 74 fc 74 2d a8 8e 06 60 
+       06 9e 5f 75 a8 06 60 75 47 01 cf 9e 5f 2c 60 fb 
+
+  3-bit elements; 65 bytes; round-trip PASS
+  hex: f7 5d c6 25 25 17 85 72 0d 6f ff 6c 07 78 07 66 
+       66 0c 6d b3 f6 83 ae 1d 5f 7f 13 ef bf 95 6f f1 
+       af c2 a0 63 f0 20 1c 5b e6 cf 1a e8 9a 4e e7 07 
+       43 74 e6 ba 21 54 a3 b7 d2 9e 7c 60 4f 7e 1d 2e 
+       00 
+
+  4-bit elements; 64 bytes; round-trip PASS
+  hex: 3e 9a a0 84 b4 29 eb 7b 6e f1 20 04 c8 28 73 d1 
+       b5 d8 55 bc 89 4b 37 98 b6 db 87 2a f1 55 57 bd 
+       9c 42 d7 f8 10 78 f5 14 f8 2a 94 0a d8 38 99 7c 
+       e4 71 a3 86 f8 58 7e d0 e0 5e 16 c2 eb 4e 6a 8c 
+
+  5-bit elements; 65 bytes; round-trip PASS
+  hex: 66 09 f4 dd 75 30 98 70 ec dc 46 b9 7a d6 31 65 
+       af eb 33 b8 24 02 6e a5 db bd 2f 38 52 96 9b 6e 
+       7e 24 16 97 e3 50 7d e4 02 70 bf 51 11 7c a4 10 
+       4e e8 e0 15 90 81 1f ac 61 cb e4 f9 9c 5a 6e 2e 
+       00 
+
+  6-bit elements; 65 bytes; round-trip PASS
+  hex: 19 3f 55 c7 08 0a 9e 0e 19 bc 5a 1d 60 c1 ba 79 
+       c4 56 8a 05 32 4d cb fa 52 a3 98 37 89 9d 42 a9 
+       3c b1 5f 6f 16 e6 e8 fc fe c4 98 de a6 f2 42 6e 
+       46 20 cd 5d 46 5a ed 3a 4d 1e 7d 70 43 04 1a 2e 
+       00 
+
+  8-bit elements; 64 bytes; round-trip PASS
+  hex: f5 92 61 34 ac 82 ee 3d 64 15 d2 e1 c3 8b 85 2a 
+       f1 23 56 12 25 1f b8 97 de ec 8b 26 1c 98 ce a8 
+       2d 50 3c f9 42 a0 bd e9 18 46 d2 4c b0 e8 a7 59 
+       30 af ad 8a b6 59 a4 50 61 b7 0d fe e3 27 79 15 
+
+  16-bit elements; 64 bytes; round-trip PASS
+  hex: 26 39 4c 7d b6 bc b2 9f 57 7c 2b 34 c8 e4 fe c5 
+       f5 05 a4 d5 6b 2d 54 e5 06 e5 2b b2 9b 46 92 05 
+       27 20 1e d3 d0 b7 e7 9a bd 79 38 4f dd e0 bc 71 
+       49 7f cd 04 aa e4 e9 cb 29 73 4d d6 9b e2 a5 b0 
+
+  32-bit elements; 64 bytes; round-trip PASS
+  hex: 3f 44 e7 2d 74 9a 4a 7a 20 cf 13 ee 19 a1 a8 fe 
+       52 04 33 5b bb a7 4d 08 a0 f0 d8 0b 91 e6 c7 ed 
+       e7 7a 20 46 f1 d2 2d 6c 92 53 95 24 dd 68 65 c0 
+       c5 59 2d 0a d0 10 fc b6 f4 12 54 4b 94 e2 29 ef 
+
+  64-bit elements; 64 bytes; round-trip PASS
+  hex: 4a 3a df 27 ff e5 42 13 e7 55 e4 b0 57 98 83 a1 
+       a8 7d 73 09 3b 02 d6 a5 3f a0 31 12 f7 a2 b1 86 
+       e2 89 ff b1 34 7f b9 06 36 ae a8 ce b2 8c 99 3f 
+       a6 2c 34 b0 67 5e 02 b1 1f 11 ea ac 68 24 c3 2c 
+
+TransformAES experimental tag; not AES-GCM (demo only; not a security rating)
+  1-bit elements; 64 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+
+  2-bit elements; 64 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+
+  3-bit elements; 65 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+       00 
+
+  4-bit elements; 64 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+
+  5-bit elements; 65 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+       00 
+
+  6-bit elements; 65 bytes; round-trip PASS
+  hex: 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f 
+       6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61 
+       7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e 
+       65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e 
+       00 
+
+  8-bit elements; 64 bytes; round-trip PASS
+  hex: 52 4d 50 50 a8 f5 b7 f5 a8 40 50 43 b7 33 40 a8 
+       3c b7 ef 9f 92 45 a8 9f b6 b7 3c ef 92 ef 40 ef 
+       da da a8 b7 34 fb a5 b7 23 04 23 05 b7 85 4d 9f 
+       4d 92 f9 fb b7 4d 9f fb 40 b6 51 92 f9 a8 9f 31 
+
+  16-bit elements; 64 bytes; round-trip PASS
+  hex: 52 4d 50 50 a8 f5 b7 f5 a8 40 50 43 b7 33 40 a8 
+       3c b7 ef 9f 92 45 a8 9f b6 b7 3c ef 92 ef 40 ef 
+       da da a8 b7 34 fb a5 b7 23 04 23 05 b7 85 4d 9f 
+       4d 92 f9 fb b7 4d 9f fb 40 b6 51 92 f9 a8 9f 31 
+
+  32-bit elements; 64 bytes; round-trip PASS
+  hex: 52 4d 50 50 a8 f5 b7 f5 a8 40 50 43 b7 33 40 a8 
+       3c b7 ef 9f 92 45 a8 9f b6 b7 3c ef 92 ef 40 ef 
+       da da a8 b7 34 fb a5 b7 23 04 23 05 b7 85 4d 9f 
+       4d 92 f9 fb b7 4d 9f fb 40 b6 51 92 f9 a8 9f 31 
+
+  64-bit elements; 64 bytes; round-trip PASS
+  hex: 52 4d 50 50 a8 f5 b7 f5 a8 40 50 43 b7 33 40 a8 
+       3c b7 ef 9f 92 45 a8 9f b6 b7 3c ef 92 ef 40 ef 
+       da da a8 b7 34 fb a5 b7 23 04 23 05 b7 85 4d 9f 
+       4d 92 f9 fb b7 4d 9f fb 40 b6 51 92 f9 a8 9f 31 
+
+Stary composed shape/mode stack (demo only; not a security rating)
+  1-bit elements; 64 bytes; round-trip PASS
+  hex: 72 8c a6 99 ab 24 27 68 10 55 b4 46 32 8e b8 b6 
+       b1 fc 13 65 5f d3 5e 7b a2 49 db bb e8 5c 7b 7a 
+       08 c0 c8 86 ba 9c 8a 00 2a b3 92 39 01 d2 00 17 
+       3e 7d 39 cb c1 55 dc b7 05 83 28 4a de 69 fb 3b 
+
+  2-bit elements; 64 bytes; round-trip PASS
+  hex: 11 ad 29 36 b4 8d 19 b6 c5 8d d2 ce a5 00 8b 8f 
+       d1 a0 89 6d c3 8e 00 dc 1d 65 ab bf 9b 1e da c2 
+       22 cf 1c ce d4 98 02 a2 cf 0a 50 6b 5d af c4 c8 
+       16 3f 07 ca 5b 0a f4 eb cf 21 d2 62 77 b0 27 78 
+
+  3-bit elements; 65 bytes; round-trip PASS
+  hex: 63 72 bb 2a 51 ff 3b cf 89 6f 72 40 91 f6 46 74 
+       8c 85 d0 70 67 e0 7f bf 3f 44 61 bd e8 16 49 80 
+       77 f2 6a 72 29 d8 2a 6b e5 a9 80 2a 69 c4 ff 9c 
+       cd 74 2b f6 b4 a5 aa 41 b4 80 dd 6f fd db 66 d6 
+       00 
+
+  4-bit elements; 64 bytes; round-trip PASS
+  hex: 10 3d 82 5d e5 d8 34 fd 52 ed a2 00 ff 36 a6 fa 
+       c6 2c 5f 60 ce f3 6e 01 ca 4f cc da cc 9a fb f8 
+       11 58 bf 73 5b 99 82 1f a9 00 35 69 8b c4 b0 1b 
+       b8 82 eb a0 71 89 39 97 7b 98 e8 68 af 21 e7 fa 
+
+  5-bit elements; 65 bytes; round-trip PASS
+  hex: d0 9b a3 77 67 5c 5a 53 5b 8d b4 9a fa 04 52 b4 
+       74 b5 74 46 f2 a7 6f 2b 8e 17 fe 9f f6 8f 5a 02 
+       b2 e4 43 e7 c3 4e d2 b3 0b 9b 28 ff 82 6b 04 c6 
+       a5 20 00 31 f9 55 03 84 db 7e c5 7c c1 b9 c4 a9 
+       20 
+
+  6-bit elements; 65 bytes; round-trip PASS
+  hex: 19 9c 10 68 c3 a2 d6 a4 14 70 9d 51 ae bf 06 75 
+       f3 f8 f8 03 0d b8 ac 58 fe 9b 61 42 3d d4 01 ac 
+       1c a8 2d b4 d2 70 24 d7 08 6f ea 64 72 08 1f 42 
+       c9 f2 08 53 6d 37 45 97 cf 20 0c d5 cd f1 6d 7a 
+       e0 
+
+  8-bit elements; 64 bytes; round-trip PASS
+  hex: 86 29 58 de 65 6d e4 68 ca 7d d8 a8 1e e3 ba fd 
+       a2 68 de 6b 03 32 34 61 85 bb c6 99 dc 73 8f 9d 
+       c9 c9 62 c3 92 ec fb 18 fd b8 d4 6d 86 f8 e8 7e 
+       aa 9e 4c 33 d5 e5 e6 0b 01 3e 9a 53 34 75 1d dc 
+
+  16-bit elements; 64 bytes; round-trip PASS
+  hex: d0 df 8d c5 2b 81 d2 6f 0b d2 88 6a aa e9 30 e7 
+       de 0e 80 b0 96 ef 76 8c b2 60 f0 03 89 1a 9e 67 
+       fe f9 f2 53 3b 77 68 bf d9 b3 a8 f2 e1 26 e9 16 
+       50 0d 01 b5 2e 4c ac dd 13 d6 36 3d 48 0b 20 1c 
+
+  32-bit elements; 64 bytes; round-trip PASS
+  hex: 35 9f bb 43 80 2b 2b 01 2f 52 7e 74 d7 cf 5f 09 
+       3c 52 f1 76 37 e6 56 03 b0 80 2c ab f9 39 b2 37 
+       dc 6f a1 3b d8 55 dd eb 9f 82 92 a1 e0 76 db 88 
+       81 80 1c 42 08 10 2b 8c 0a ac f7 1f 05 55 55 92 
+
+  64-bit elements; 64 bytes; round-trip PASS
+  hex: 7c 18 4a b7 1c 0f 4f 32 d3 b8 53 ec a1 8e 8a 6c 
+       18 9d 16 da e5 c8 5b bd a9 f6 b6 bd 14 90 28 ab 
+       a8 da 86 e3 5d be 01 d8 69 1e 24 4b 13 70 2e 1d 
+       25 33 94 4a 68 e9 60 f7 c3 b8 b1 14 11 59 13 1d 
+
+Square + Circle + Scatter + Diffuse + BitwiseXor (demo only; not a security rating)
+  1-bit elements; 64 bytes; round-trip PASS
+  hex: ac 71 19 dc af d4 bd 06 41 be 98 d4 d8 dc 0c fe 
+       e1 5b f7 9c b4 85 54 87 fb 2e ed b1 67 e7 15 6f 
+       df 59 e5 60 12 00 0e 91 f7 ab 45 5c d9 44 d0 7f 
+       58 37 f6 2b 4a 51 4b a2 24 62 2f 2d 54 47 09 8c 
+
+  2-bit elements; 64 bytes; round-trip PASS
+  hex: 02 3f 14 c0 ae 6e 7d 9c 60 17 11 83 45 38 04 f2 
+       d4 c4 78 16 7d 72 6f 0b 41 6c 19 af 48 e2 5e 60 
+       9f 9a 70 8f 7d 9e 07 84 b8 9a 39 8e d0 65 02 8b 
+       d2 39 15 67 37 be b7 86 9d d7 9e d4 8f f1 b8 ce 
+
+  3-bit elements; 65 bytes; round-trip PASS
+  hex: b7 aa ba bf 3b c4 dc 4b 60 6d f1 05 4d 26 50 7b 
+       e0 82 14 59 9a 89 b4 31 7d 88 92 d5 08 5f 94 4a 
+       74 37 2d 3f f9 57 ce 2e c5 62 37 e3 5a ea ef ab 
+       78 6f ae 0b 59 48 80 95 28 1f fb dc 83 90 43 63 
+       00 
+
+  4-bit elements; 64 bytes; round-trip PASS
+  hex: ef 2d c8 22 f0 c2 83 2a 49 6a 95 86 e8 05 85 ca 
+       ac 83 d0 96 e3 e9 e4 01 2d 6c 44 f9 e8 e7 0e 9a 
+       e1 f5 05 3d 56 1f 6a 08 27 1b 6f 8b b7 12 db b3 
+       2a e5 5d 8e 86 9b aa 37 7f bb b1 4b 65 fc d2 e7 
+
+  5-bit elements; 65 bytes; round-trip PASS
+  hex: 55 13 37 f2 75 d0 ca aa f8 cd 2a 6d 6a f8 67 a4 
+       0b 5d 63 4e f2 2d 6b 5c c8 b8 15 ee 44 e8 7d c4 
+       cd b2 22 30 0f 99 85 4b a0 d3 b7 f2 b3 ac 43 dd 
+       df 41 17 b2 f1 08 81 fe 27 7c 3e 19 a1 54 c1 1c 
+       c0 
+
+  6-bit elements; 65 bytes; round-trip PASS
+  hex: 1a 3b 47 4e 68 d4 80 b9 01 83 64 fe 6a 96 4c c9 
+       21 c9 44 a6 0d 3a cf 0d 4b 73 47 14 a1 75 01 8d 
+       68 23 09 94 e3 f5 49 02 6d 0d 8e 0b 06 c6 02 2e 
+       51 f1 f6 d7 13 7f c0 29 28 fc 77 e5 41 70 cc eb 
+       c0 
+
+  8-bit elements; 64 bytes; round-trip PASS
+  hex: 8b 9a ff 8b 0e fb ac 8d c3 88 c3 2f a7 79 ac 7a 
+       80 f7 68 31 6e fc 04 dd 9b 1c 58 f6 91 e1 a6 dc 
+       64 12 f4 37 94 fc f5 79 37 ed 7b e1 45 cd d1 0a 
+       a9 01 a1 2e 4c 7d 66 de 40 94 10 59 a8 86 48 ac 
+
+  16-bit elements; 64 bytes; round-trip PASS
+  hex: 6e 98 5b b7 8e db a8 81 77 4d 3a a4 f1 e0 cf e4 
+       fa bd 59 f1 13 e4 7b 33 cb b6 8c 68 c7 ff 0c 23 
+       25 88 d9 f9 54 38 65 6a 58 6a 6c 91 a3 25 5c b2 
+       04 e8 0c 0e 29 51 14 ae 99 9b 81 8a 27 97 7b a7 
+
+  32-bit elements; 64 bytes; round-trip PASS
+  hex: 23 71 6f d7 20 40 01 a8 e2 8d d4 ef 03 86 ed a2 
+       1b 5f 27 7c ec 5f 29 90 b8 81 ad af 85 20 84 f9 
+       ec eb f9 ee 9c 38 55 a1 2f 71 54 cd 6a fb 78 04 
+       c0 77 87 db f6 8a 8f 06 a5 5b 9b f5 f7 5f 40 67 
+
+  64-bit elements; 64 bytes; round-trip PASS
+  hex: 01 5f 18 13 3e 79 23 87 55 16 56 5e 55 41 52 f8 
+       39 46 1e 59 f4 ba e5 c5 25 6a 3c 79 49 90 bf e7 
+       17 5a 0e 4f 6c 25 0c 47 3a 33 2d 62 bb 49 71 c7 
+       39 11 09 00 f8 c9 f8 ec 40 49 42 42 b1 2a 9b f5 
+
+Triangle + Hexagon + Scatter + Diffuse + TransformChaCha (demo only; not a security rating)
+  1-bit elements; 64 bytes; round-trip PASS
+  hex: 22 1a 0e 29 45 50 81 79 dc 78 0a 55 a0 fd 20 8b 
+       14 77 45 ee f6 fe 99 7b 9a 29 93 da b1 13 fc b9 
+       4a c0 c3 53 83 d9 37 6c 35 c3 29 fd de 8a 26 25 
+       fb 6a 89 c4 87 52 d8 bb 1a 1b 08 b1 10 46 7d d4 
+
+  2-bit elements; 64 bytes; round-trip PASS
+  hex: cd 3b 74 7e 48 4d 61 9c bf c5 5a 80 8a 8b be 3f 
+       a2 0e 2a aa 23 1a 42 2a b0 71 c6 1b 5c 3d e9 19 
+       c1 94 f0 d0 34 24 26 9d 98 6f d4 ea 07 20 63 ef 
+       c1 ef 5b bb fe 58 91 79 f2 30 12 c2 a5 2b 46 3f 
+
+  3-bit elements; 65 bytes; round-trip PASS
+  hex: 3a ec 37 30 64 c4 62 05 33 61 aa 26 bd 2a d7 62 
+       21 a3 21 83 f2 32 73 8d 9c 6f 65 63 82 a2 d1 4a 
+       31 b5 ed 95 9d e8 9a 7f 12 d2 17 69 f6 cb 98 0b 
+       61 84 c1 3c 46 62 50 c5 74 e5 ad 2d 5d 3d 75 c8 
+       00 
+
+  4-bit elements; 64 bytes; round-trip PASS
+  hex: 30 b1 29 6b dd ec a3 c0 06 12 3a 70 68 a0 14 9b 
+       f8 81 69 ff eb 1b 24 c1 ea 3b 1f 58 7e 1f 72 87 
+       b1 d6 03 fe e1 a7 33 a9 0f 6a 78 13 0c 84 49 25 
+       09 5d 0e f6 3e 21 10 dd 75 92 72 3f 79 da 81 0f 
+
+  5-bit elements; 65 bytes; round-trip PASS
+  hex: 84 9e 61 1a b7 1a ba 5e df dd 79 1b 08 5c d5 c6 
+       df 7b 7d 01 d4 89 22 96 eb 50 26 ef 2b 32 6b 05 
+       1a 33 9a d0 c5 33 fa 12 a5 78 a6 65 e3 72 c8 b9 
+       76 d8 86 93 e4 50 10 49 cd e1 73 f9 56 08 e5 a8 
+       e0 
+
+  6-bit elements; 65 bytes; round-trip PASS
+  hex: b9 e7 69 f6 67 2d ba ec e0 92 5e dd 50 51 2d 08 
+       cc 5f 2a f2 f3 61 9d 85 4a 36 42 78 17 05 63 53 
+       83 a2 49 9d a1 80 db 4a 16 5f 73 11 cb 3b 62 69 
+       c4 78 cb 70 d2 79 c0 a6 d0 a3 b1 7e 8f 83 e8 be 
+       00 
+
+  8-bit elements; 64 bytes; round-trip PASS
+  hex: 4d 4f 0f 39 c2 c1 42 cd 2e 03 e9 4c 2a d2 99 16 
+       16 6b 11 5e 02 c4 ed 68 87 e1 f1 26 c5 1e 63 b0 
+       ce 1e a7 33 03 77 49 f1 d3 c4 59 06 2c 95 eb 5d 
+       a8 a6 16 a5 72 d6 83 b5 a1 7a ab 48 10 b2 a5 ae 
+
+  16-bit elements; 64 bytes; round-trip PASS
+  hex: bf 28 af 9a bc 6e c6 1c 2e 5a c5 d8 5c 9c 2a 59 
+       ca c9 f1 4d 93 70 f0 eb f4 eb b7 22 45 60 10 52 
+       c6 cb 55 51 08 06 c1 03 f1 32 88 e9 13 d5 ad db 
+       aa c6 cb a7 6b 1b 58 8c e4 10 50 84 71 e5 eb 7a 
+
+  32-bit elements; 64 bytes; round-trip PASS
+  hex: 85 6f 26 0e 42 9d 20 83 42 73 bc 85 cf d9 a7 71 
+       85 c5 78 32 94 66 69 95 24 07 e3 96 fd 77 52 f7 
+       bb 04 4b f1 85 f0 4f 44 9b ee 68 8a 07 c6 dc 0b 
+       fe 93 e8 46 04 b7 36 f6 0a 90 03 a5 61 7a 68 29 
+
+  64-bit elements; 64 bytes; round-trip PASS
+  hex: 53 b0 25 34 6f 77 5e 6b 6d 66 3c c7 7f 1e ad 65 
+       37 ab 67 a6 cf 20 f4 f9 10 55 1e ea 1c 7e 58 e3 
+       01 6c 8e 93 0f 9f e6 bb 61 09 86 8a e1 d2 65 df 
+       c8 ec 4d 7c 0f 8e a6 22 ae 64 23 84 94 57 e0 1b 
+
+
+DEMO CREDENTIALS AND DECRYPTED OUTPUT
+=====================================
+Password-file first line: password
+Electronic-password-file first line: secondary electronic password with spaces
+Decrypted output text (verified at each width): Hellow world from anthony matarazzo (c) 2026 genetic encryption.
+Decrypted output hex:
+000000 48 65 6c 6c 6f 77 20 77 6f 72 6c 64 20 66 72 6f
+000010 6d 20 61 6e 74 68 6f 6e 79 20 6d 61 74 61 72 61
+000020 7a 7a 6f 20 28 63 29 20 32 30 32 36 20 67 65 6e
+000030 65 74 69 63 20 65 6e 63 72 79 70 74 69 6f 6e 2e
